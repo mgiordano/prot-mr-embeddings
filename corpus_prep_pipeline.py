@@ -3,6 +3,7 @@ from prefect import flow, task, tags
 import os
 import pandas as pd
 import json
+from itertools import chain
 
 # MR Filter types
 MR_FILTER_NONE = {
@@ -41,8 +42,20 @@ MR_FILTER_KEEP_LEN6PLUS = {
     "condition" : ">=",
     "by" : "length",
     "value" : 6,
-    "name" : "filter_keep_len6plus"
+    "name" : "filter_keep_length_6plus"
 }
+
+# Partition rules
+PARTITION_RULE_USE_ALL = {
+    "name" : "partition_use_all"
+}
+
+def custom_agg_list(series):
+    if series.isnull().all():
+        # avoid [NaN] for missing values on left join
+        return []  # Return an empty list for all-NaN groups
+    else:
+        return list(series.dropna())  # Remove NaNs within the list
 
 def compute_probability(pattern: str, aminoacid_frequencies):
     probability = 1
@@ -63,7 +76,25 @@ def calculate_number_of_patterns_of_length(pattern_length: int, sequence_dataset
         return count
     else:
         return possible_patterns_cache[pattern_length]
-
+    
+def compute_pattern_repeats_matrix(row):
+    sequence = row["sequence"]
+    pattern_list = row["patterns"]
+    # each row of the matrix will correspond
+    # to the ith char position in the sequence string
+    partition_matrix = []
+    for i in range(len(sequence) - 1):
+        # initialize matrix row with empty array
+        partition_matrix.append([])
+        # then search for matching patterns that are
+        # substrings of sequence at the ith position
+        for pattern in pattern_list:
+            if sequence.startswith(pattern, i):
+                # if there's a match, add a pattern instance
+                # to the ith row of the matrix
+                partition_matrix[i].append(pattern)
+    return partition_matrix
+    
 @task(log_prints=True)
 def load_sequence_dataset(input_data_root_path: str, family_dataset_name: str):
     input_sequence_dataset_path = os.path.join(input_data_root_path,family_dataset_name, family_dataset_name+"_sequence_dataset.csv")
@@ -141,9 +172,7 @@ def filter_mrs_with_query(mr_dataset_df, filter_attr, filter_condition, filter_v
     return mr_dataset_df
 
 @flow(name="Filter Maximal Repeats", log_prints=True)
-def filter_maximal_repeats(input_data_root_path: str, family_dataset_name: str, filter):
-    sequence_dataset_df = load_sequence_dataset(input_data_root_path, family_dataset_name)
-    mr_dataset_df = load_mr_dataset(input_data_root_path, family_dataset_name)
+def filter_maximal_repeats(mr_dataset_df, sequence_dataset_df, filter):
 
     original_length = len(mr_dataset_df)
 
@@ -154,30 +183,97 @@ def filter_maximal_repeats(input_data_root_path: str, family_dataset_name: str, 
     else:
         mr_dataset_df = filter_mrs_with_query(mr_dataset_df, filter["by"], filter["condition"], filter["value"])
     print(len(mr_dataset_df) / original_length)
-    datasets = {
-        "mr_df" : mr_dataset_df,
-        "sequence_df" :  sequence_dataset_df
-    }
-    return datasets
+    print(mr_dataset_df.head(10))
+
+    return mr_dataset_df
+
+@task(log_prints=True)
+def join_datasets(sequence_df, mr_df):
+
+    # only keep columns relevant to the join
+    mr_lean_df = mr_df[["pattern", "affected_protein_ids"]]
+
+    # flatten the list of protein IDs for performing join
+    mr_exploded_df = mr_lean_df.explode("affected_protein_ids")
+    
+    # rename columns for proper join key
+    mr_exploded_df = mr_exploded_df.rename(columns={'affected_protein_ids': 'protein_id'})
+    sequence_df = sequence_df.rename(columns={'id': 'protein_id'})
+
+    print(len(sequence_df))
+    print(len(mr_exploded_df))
+    joined_df = sequence_df.join(mr_exploded_df.set_index("protein_id"), on="protein_id", validate="1:m")
+    print(len(joined_df))
+
+    # Set pattern as the aggregate column
+    agg_columns = {'pattern': custom_agg_list}
+
+    # Get all columns not in agg_columns and apply 'first' to them
+    # as sequence dataset values will be the same across repeated rows
+    default_agg = {col: 'first' for col in joined_df.columns if col not in agg_columns}
+
+    # Apply groupby into new dataframe
+    grouped_df = joined_df.groupby('protein_id').agg({**default_agg, **agg_columns}).reset_index(drop=True)
+
+    # Rename the aggregated column
+    grouped_df = grouped_df.rename(columns={'pattern': 'patterns'})
+
+    # grouped_df has, for each sequence, a list of the filtered MRs patterns that belong to that seq
+    return grouped_df
+
+@task(log_prints=True)
+def compute_pattern_repeats_in_order(joined_sequence_dataset_df):
+    joined_sequence_dataset_df["word_partition_matrix"] = joined_sequence_dataset_df.apply(compute_pattern_repeats_matrix, axis=1)
+    joined_sequence_dataset_df = joined_sequence_dataset_df.drop(columns=["patterns"])
+    return joined_sequence_dataset_df
+
+@task(log_prints=True)
+def flatten_partition_matrix(corpus_matrix_df):
+     corpus_matrix_df["word_partition"] = corpus_matrix_df["word_partition_matrix"].apply(lambda x: " ".join(list(chain.from_iterable(x))))
+     corpus_matrix_df = corpus_matrix_df.drop(columns=["word_partition_matrix"])
+
+     return corpus_matrix_df
+
+@flow(name="Compute BioWord Partition", log_prints=True)
+def compute_bioword_partition(sequence_df, mr_df, partition_rule):
+
+    joined_sequence_dataset_df = join_datasets(sequence_df, mr_df)
+
+    # TODO: apply filters based on rules?
+
+    corpus_matrix_partition_df = compute_pattern_repeats_in_order(joined_sequence_dataset_df)
+
+    corpus_df = flatten_partition_matrix(corpus_matrix_partition_df)
+    print(corpus_df.head(10))
+    return corpus_df
+
+@flow(name="Prepare BioWord Protein Corpus", log_prints=True)
+def prepare_corpus(input_data_root_path: str, family_dataset_name: str, filter, partition_rule):
+
+    sequence_dataset_df = load_sequence_dataset(input_data_root_path, family_dataset_name)
+    mr_dataset_df = load_mr_dataset(input_data_root_path, family_dataset_name)
+
+    # SUB FLOW 1: Filter Maximal Repeats
+    # execute flow by loading datasets and applying filter rule
+    # return sequences and filtered MRs for next step flow
+    filtered_mr_dataset = filter_maximal_repeats(mr_dataset_df, sequence_dataset_df, filter)
+
+    # SUB FLOW 2: Compute BioWord Partition
+    # apply word partitioning rule to the sequence dataset
+    # based on the filtered MRs
+    # return full corpus for next step flow
+    corpus = compute_bioword_partition(sequence_dataset_df, filtered_mr_dataset, partition_rule)
+
 
 # run the flow!
 if __name__=="__main__":
-
-    # to do: adapt dataset location to allow flexible setup
+    # TODO: adapt dataset location to allow flexible setup
     # currently processed datasets holds the exact folder structure
     # as processed by mr-generator output
-    proteins_db_path = os.path.join(os.path.dirname(os.getcwd()), "proteins_db", 'processed_datasets')
+    input_data_root_path = os.path.join(os.path.dirname(os.getcwd()), "proteins_db", 'processed_datasets')
+    family_dataset_name = "testGroupDataset"
+    filter = MR_FILTER_KEEP_SIGNIFICANT
+    partition_rule = PARTITION_RULE_USE_ALL
 
-    filter = MR_FILTER_KEEP_LEN6PLUS
-    with tags(filter["name"]):
-
-        # FLOW 1: Filter Maximal Repeats
-        # execute flow by loading datasets and applying filter rule
-        # return sequences and filtered MRs for next step flow
-        datasets = filter_maximal_repeats(proteins_db_path, "testGroupDataset", filter)
-
-        # FLOW 2: Compute BioWord Partition
-        # apply word partitioning rule to the sequence dataset
-        # based on the filtered MRs
-        # return full corpus for next step flow
- 
+    with tags(filter["name"], partition_rule["name"]):
+        prepare_corpus(input_data_root_path, family_dataset_name, filter, partition_rule)
