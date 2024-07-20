@@ -4,6 +4,7 @@ import os
 import pandas as pd
 import json
 from itertools import chain
+from datetime import datetime
 
 # MR Filter types
 MR_FILTER_NONE = {
@@ -110,6 +111,16 @@ def load_mr_dataset(input_data_root_path: str, family_dataset_name: str):
     
     mr_dataset_df = pd.json_normalize(data, max_level=0) 
     return mr_dataset_df
+
+@task(log_prints=True)
+def save_corpus_dataset(input_data_root_path: str, family_dataset_name: str, corpus_dataset, filter_name: str, partition_rule_name: str):
+    now_timestamp = datetime.now()
+    date_formatted = now_timestamp.strftime("%Y%m%d")
+    ts_formatted = now_timestamp.strftime("%Y%m%d_%H_%M_%S")
+    parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date_formatted)
+    os.makedirs(parent_folder_path, exist_ok=True)
+    write_path = os.path.join(parent_folder_path, "corpus_full_"+family_dataset_name+"_"+filter_name+"_"+partition_rule_name+"_"+ts_formatted+".csv")
+    corpus_dataset.to_csv(write_path, index=False)
 
 @task(log_prints=True)
 def count_aminoacid_frequency(sequence_dataset_df):
@@ -262,7 +273,9 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, filter, 
     # apply word partitioning rule to the sequence dataset
     # based on the filtered MRs
     # return full corpus for next step flow
-    corpus = compute_bioword_partition(sequence_dataset_df, filtered_mr_dataset, partition_rule)
+    corpus_dataset = compute_bioword_partition(sequence_dataset_df, filtered_mr_dataset, partition_rule)
+    
+    save_corpus_dataset(input_data_root_path, family_dataset_name, corpus_dataset, filter["name"], partition_rule["name"])
 
 
 # run the flow!
