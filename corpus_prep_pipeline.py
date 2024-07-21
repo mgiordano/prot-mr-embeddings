@@ -81,6 +81,7 @@ def calculate_number_of_patterns_of_length(pattern_length: int, sequence_dataset
 def compute_pattern_repeats_matrix(row):
     sequence = row["sequence"]
     pattern_list = row["patterns"]
+    partition_size = 0
     # each row of the matrix will correspond
     # to the ith char position in the sequence string
     partition_matrix = []
@@ -94,6 +95,10 @@ def compute_pattern_repeats_matrix(row):
                 # if there's a match, add a pattern instance
                 # to the ith row of the matrix
                 partition_matrix[i].append(pattern)
+                partition_size += 1
+    if partition_size == 0:
+        # if no matching patterns, use full sequence as only word
+        partition_matrix[0].append(sequence)
     return partition_matrix
     
 @task(log_prints=True)
