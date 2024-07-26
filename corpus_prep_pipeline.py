@@ -72,7 +72,7 @@ def calculate_number_of_patterns_of_length(pattern_length: int, sequence_dataset
     if(pattern_length not in possible_patterns_cache):
         filtered_sequence_dataset_df = sequence_dataset_df[sequence_dataset_df["sequence"].str.len() >= pattern_length]
         possible_subsequences_number = filtered_sequence_dataset_df["sequence"].str.len() - pattern_length + 1
-        count = possible_subsequences_number.sum()
+        count = int(possible_subsequences_number.sum()) * int(20**pattern_length)
         possible_patterns_cache[pattern_length] = count
         return count
     else:
@@ -173,13 +173,13 @@ def filter_mrs_with_statistical_significance(sequence_dataset_df, mrs_dataset_df
 
     # 2 - calculate pattern observed probability by dividing the total number of pattern instances
     # in the dataset over the total universe of possible patterns of same length in the dataset
-    mrs_dataset_df["pattern_observed_probability"] = mrs_dataset_df["instances"] / mrs_dataset_df["total_possible_patterns"]
+    mrs_dataset_df["pattern_observed_probability"] = (mrs_dataset_df["instances"] / mrs_dataset_df["total_possible_patterns"]).astype(float)
 
     # Filter rows by only keeping the patterns whose observed prob is greater than the theoretical prob
     # this is a proxy for statistical significance: patterns that appear more than one would expect randomly
     # based on the dataset aminoacid distribution
     filtered_mrs_dataset_df = mrs_dataset_df[mrs_dataset_df["pattern_observed_probability"] > mrs_dataset_df["pattern_base_probability"]]
-
+    #filtered_mrs_dataset_df = mrs_dataset_df[mrs_dataset_df["instances"] > (mrs_dataset_df["total_possible_patterns"] * mrs_dataset_df["pattern_base_probability"])]
     return filtered_mrs_dataset_df
 
 @task(log_prints=True)
