@@ -1,4 +1,4 @@
-from prefect import flow, task, tags
+from prefect import flow, tags
 # from prefect.cache_policies import TASK_SOURCE, INPUTS
 import os
 import pandas as pd
@@ -6,6 +6,7 @@ import json
 from itertools import chain
 from datetime import datetime
 from dotenv import dotenv_values
+from corpus_prep_utils import task
 
 # MR Filter types
 MR_FILTER_NONE = {
