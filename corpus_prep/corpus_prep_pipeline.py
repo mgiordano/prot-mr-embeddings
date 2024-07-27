@@ -5,6 +5,7 @@ import pandas as pd
 import json
 from itertools import chain
 from datetime import datetime
+from dotenv import dotenv_values
 
 # MR Filter types
 MR_FILTER_NONE = {
@@ -288,7 +289,10 @@ if __name__=="__main__":
     # TODO: adapt dataset location to allow flexible setup
     # currently processed datasets holds the exact folder structure
     # as processed by mr-generator output
-    input_data_root_path = os.path.join(os.path.dirname(os.getcwd()), "proteins_db", 'processed_datasets')
+    #input_data_root_path = os.path.join(os.path.dirname(os.getcwd()), "proteins_db", 'processed_datasets')
+    
+    config = dotenv_values(".env")
+    input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     family_dataset_name = "testGroupDataset"
     filter = MR_FILTER_KEEP_SIGNIFICANT
     partition_rule = PARTITION_RULE_USE_ALL

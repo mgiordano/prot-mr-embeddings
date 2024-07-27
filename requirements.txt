@@ -1,3 +1,5 @@
 -e ../biovec
 prefect --pre
 pandas
+python-dotenv
+ipykernel
