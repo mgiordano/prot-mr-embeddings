@@ -3,3 +3,5 @@ prefect --pre
 pandas
 python-dotenv
 ipykernel
+matplotlib
+seaborn
