@@ -1,6 +1,49 @@
 import pytest
 import pandas as pd
 import corpus_prep_pipeline as corpus_prep
+from dotenv import dotenv_values
+
+config = dotenv_values("../.env")
+input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
+
+@pytest.fixture
+def sequence_test_df():
+    return corpus_prep.load_sequence_dataset(input_data_root_path, corpus_prep.TEST_GROUP_DATASET_NAME)
+
+@pytest.fixture
+def mr_test_df():
+    return corpus_prep.load_mr_dataset(input_data_root_path, corpus_prep.TEST_GROUP_DATASET_NAME)
+
+# #######################################
+#      INPUT DATA VALIDATION TESTS      #
+# #######################################
+
+def check_affected_proteins(mr_row, sequence_test_df):
+    '''For a given MR, check if pattern is a valid substring of affected protein'''
+    pattern = mr_row["pattern"]
+    instances = mr_row["instances"]
+    affected_count = 0
+    for affected_protein in mr_row["affected_proteins"]:
+        # for each affected protein id, retrieve sequence in seq dataset
+        # sequence id corresponds to row index
+        protein_id = affected_protein["protein_id"]
+        sequence_row = sequence_test_df.iloc[protein_id]
+        sequence = sequence_row["sequence"]
+        for position in affected_protein["starting_positions"]:
+            # for each declared position, check if valid substring in sequence
+            assert sequence.startswith(pattern, position)
+            # accumulate instances accross all affected prots
+            affected_count += 1
+    # check global affected count vs instances
+    assert instances == affected_count
+
+def test_validate_mr_dataset(sequence_test_df, mr_test_df):
+    '''Test correctness of input MR dataset, mainly that for each pattern affected proteins correspond'''
+    mr_test_df.apply(check_affected_proteins, args=[sequence_test_df,], axis=1)
+
+# #######################################
+#       MR FILTERS TESTS                #
+# #######################################
 
 @pytest.fixture
 def sample_sequence_dataset_df():

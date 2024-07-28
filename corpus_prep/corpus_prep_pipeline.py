@@ -2,6 +2,7 @@ from prefect import flow, tags
 # from prefect.cache_policies import TASK_SOURCE, INPUTS
 import os
 import pandas as pd
+import numpy as np
 import json
 from itertools import chain
 from datetime import datetime
@@ -57,11 +58,13 @@ PARTITION_RULE_USE_ALL = {
 TEST_GROUP_DATASET_NAME = "testGroupDataset"
 
 def custom_agg_list(series):
-    if series.isnull().all():
-        # avoid [NaN] for missing values on left join
-        return []  # Return an empty list for all-NaN groups
-    else:
-        return list(series.dropna())  # Remove NaNs within the list
+    filtered_series = series.dropna()
+    pattern_positions = [
+        {"pattern": row['pattern'], "starting_positions": row['starting_positions']}
+        for _, row in filtered_series.iterrows()
+    ]
+    return pattern_positions
+
 
 def compute_probability(pattern: str, aminoacid_frequencies):
     probability = 1
@@ -70,7 +73,6 @@ def compute_probability(pattern: str, aminoacid_frequencies):
     
     return probability
 
-#@task(cache_policy=TASK_SOURCE + INPUTS, log_prints=False)
 def calculate_number_of_patterns_of_length(pattern_length: int, sequence_dataset_df, possible_patterns_cache):
     # pattern_length - sequence_length + 1 is the total number of possible subsequences of pattern length in sequence
     # calculate for each sequence and then return global count
@@ -85,23 +87,21 @@ def calculate_number_of_patterns_of_length(pattern_length: int, sequence_dataset
     
 def compute_pattern_repeats_matrix(row):
     sequence = row["sequence"]
-    pattern_list = row["patterns"]
-    partition_size = 0
+    sequence_length = len(sequence)
+    pattern_list = row["pattern_positions"]
+
     # each row of the matrix will correspond
     # to the ith char position in the sequence string
-    partition_matrix = []
-    for i in range(len(sequence) - 1):
-        # initialize matrix row with empty array
-        partition_matrix.append([])
-        # then search for matching patterns that are
-        # substrings of sequence at the ith position
-        for pattern in pattern_list:
-            if sequence.startswith(pattern, i):
-                # if there's a match, add a pattern instance
-                # to the ith row of the matrix
-                partition_matrix[i].append(pattern)
-                partition_size += 1
-    if partition_size == 0:
+    # initialize all rows with empty arrays
+    partition_matrix = np.frompyfunc(list, 0, 1)(np.empty((sequence_length,), dtype=object))
+    # iterate through patterns
+    for pattern_position in pattern_list:
+        pattern = pattern_position["pattern"]
+        # insert pattern in ith row of the matrix
+        for position in pattern_position["starting_positions"]:
+            partition_matrix[position].append(pattern)
+
+    if len(pattern_list) == 0:
         # if no matching patterns, use full sequence as only word
         partition_matrix[0].append(sequence)
     return partition_matrix
@@ -212,13 +212,17 @@ def filter_maximal_repeats(mr_dataset_df, sequence_dataset_df, filter):
 def join_datasets(sequence_df, mr_df):
 
     # only keep columns relevant to the join
-    mr_lean_df = mr_df[["pattern", "affected_protein_ids"]]
+    mr_lean_df = mr_df[["pattern", "affected_proteins"]]
 
-    # flatten the list of protein IDs for performing join
-    mr_exploded_df = mr_lean_df.explode("affected_protein_ids")
-    
-    # rename columns for proper join key
-    mr_exploded_df = mr_exploded_df.rename(columns={'affected_protein_ids': 'protein_id'})
+    # flatten the list of affected proteins for performing join
+    mr_exploded_df = mr_lean_df.explode("affected_proteins")
+    # extract protein_id and starting_positions array into new columns
+    mr_exploded_df['protein_id'] = mr_exploded_df["affected_proteins"].apply(lambda x: x['protein_id'])
+    mr_exploded_df['starting_positions'] = mr_exploded_df["affected_proteins"].apply(lambda x: x['starting_positions'])
+    # purge old column
+    mr_exploded_df = mr_exploded_df.drop(columns=["affected_proteins"])
+
+    # rename column for proper join key
     sequence_df = sequence_df.rename(columns={'id': 'protein_id'})
 
     print(len(sequence_df))
@@ -226,26 +230,22 @@ def join_datasets(sequence_df, mr_df):
     joined_df = sequence_df.join(mr_exploded_df.set_index("protein_id"), on="protein_id", validate="1:m")
     print(len(joined_df))
 
-    # Set pattern as the aggregate column
-    agg_columns = {'pattern': custom_agg_list}
-
-    # Get all columns not in agg_columns and apply 'first' to them
-    # as sequence dataset values will be the same across repeated rows
-    default_agg = {col: 'first' for col in joined_df.columns if col not in agg_columns}
-
-    # Apply groupby into new dataframe
-    grouped_df = joined_df.groupby('protein_id').agg({**default_agg, **agg_columns}).reset_index(drop=True)
-
-    # Rename the aggregated column
-    grouped_df = grouped_df.rename(columns={'pattern': 'patterns'})
-
+    # Group by 'id' and rest of seq columns while applying custom agg for pattern and positions
+    grouped_df = (
+        joined_df.groupby([col for col in sequence_df.columns])
+        .apply(lambda x: pd.Series({'pattern_positions': custom_agg_list(x[['pattern', 'starting_positions']])}))
+        .reset_index()
+    )
+    print(grouped_df.head(10))
+    
     # grouped_df has, for each sequence, a list of the filtered MRs patterns that belong to that seq
+    # and their starting positions in it
     return grouped_df
 
 @task(log_prints=True)
 def compute_pattern_repeats_in_order(joined_sequence_dataset_df):
     joined_sequence_dataset_df["word_partition_matrix"] = joined_sequence_dataset_df.apply(compute_pattern_repeats_matrix, axis=1)
-    joined_sequence_dataset_df = joined_sequence_dataset_df.drop(columns=["patterns"])
+    joined_sequence_dataset_df = joined_sequence_dataset_df.drop(columns=["pattern_positions"])
     return joined_sequence_dataset_df
 
 @task(log_prints=True)
@@ -294,7 +294,7 @@ if __name__=="__main__":
     # currently processed datasets holds the exact folder structure
     # as processed by mr-generator output
     
-    config = dotenv_values(".env")
+    config = dotenv_values("../.env")
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     family_dataset_name = TEST_GROUP_DATASET_NAME
     filter = MR_FILTER_KEEP_SIGNIFICANT
