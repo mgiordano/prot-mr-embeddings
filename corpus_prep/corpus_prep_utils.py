@@ -1,4 +1,4 @@
-from prefect import task
+from prefect import task as prefect_task
 from functools import wraps
 
 def in_prefect_flow_context():
@@ -18,7 +18,7 @@ def task(**task_kwargs): # Accept kwargs for @task
         @wraps(func)
         def wrapper(*args, **kwargs):
             if in_prefect_flow_context():
-                return task(func, **task_kwargs)(*args, **kwargs)  # Apply with kwargs
+                return prefect_task(func, **task_kwargs)(*args, **kwargs)  # Apply with kwargs
             else:
                 return func(*args, **kwargs)
         return wrapper
