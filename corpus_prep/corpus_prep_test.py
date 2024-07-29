@@ -1,6 +1,7 @@
 import pytest
 import pandas as pd
 import corpus_prep_pipeline as corpus_prep
+from corpus_prep_utils import dataset_names, filters
 from dotenv import dotenv_values
 
 config = dotenv_values("../.env")
@@ -8,11 +9,11 @@ input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
 
 @pytest.fixture
 def sequence_test_df():
-    return corpus_prep.load_sequence_dataset(input_data_root_path, corpus_prep.TEST_GROUP_DATASET_NAME)
+    return corpus_prep.load_sequence_dataset(input_data_root_path, dataset_names.TEST_GROUP_DATASET_NAME)
 
 @pytest.fixture
 def mr_test_df():
-    return corpus_prep.load_mr_dataset(input_data_root_path, corpus_prep.TEST_GROUP_DATASET_NAME)
+    return corpus_prep.load_mr_dataset(input_data_root_path, dataset_names.TEST_GROUP_DATASET_NAME)
 
 # #######################################
 #      INPUT DATA VALIDATION TESTS      #
@@ -80,3 +81,26 @@ def test_count_aminoacid_frequency(sample_sequence_dataset_df):
     # check all relative frequencies sum 1 (except rounding error)
     assert sum - 1 < 0.00000000001
 
+def check_filtered_values(df, filter):
+    original_size = len(df)
+    count_value = (df[filter.by] == filter.value).sum()
+    filtered_mr_df = corpus_prep.filter_mrs_with_query(df, filter)
+    assert len(filtered_mr_df) == original_size - count_value
+    assert (filtered_mr_df[filter.by] == filter.value).sum() == 0
+
+def test_filter_with_query_types(mr_test_df):
+    ## Drop SMR case
+    check_filtered_values(mr_test_df, filters.MR_FILTER_DROP_SMR)
+    ## Drop NN case
+    check_filtered_values(mr_test_df, filters.MR_FILTER_DROP_NN)
+    ## Drop NE case
+    check_filtered_values(mr_test_df, filters.MR_FILTER_DROP_NE)
+
+def test_filter_with_query_len(mr_test_df):
+    ## Keep length >= 6 case
+    filter = filters.MR_FILTER_KEEP_LEN6PLUS
+    original_size = len(mr_test_df)
+    count_value = (mr_test_df[filter.by] < filter.value).sum()
+    filtered_mr_df = corpus_prep.filter_mrs_with_query(mr_test_df, filter)
+    assert len(filtered_mr_df) == original_size - count_value
+    assert (filtered_mr_df[filter.by] < filter.value).sum() == 0

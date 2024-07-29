@@ -7,55 +7,7 @@ import json
 from itertools import chain
 from datetime import datetime
 from dotenv import dotenv_values
-from corpus_prep_utils import task
-
-# MR Filter types
-MR_FILTER_NONE = {
-    "by" : "none",
-    "name" : "filter_none"
-}
-
-MR_FILTER_KEEP_SIGNIFICANT = {
-    "condition" : "include",
-    "by" : "significance",
-    "name" : "filter_keep_significant"
-}
-
-MR_FILTER_DROP_SMR = {
-    "condition" : "exclude",
-    "by" : "type",
-    "value" : "'SMR'",
-    "name" : "filter_drop_smr"
-}
-
-MR_FILTER_DROP_NE = {
-    "condition" : "exclude",
-    "by" : "type",
-    "value" : "'NE'",
-    "name" : "filter_drop_ne"
-}
-
-MR_FILTER_DROP_NN = {
-    "condition" : "!=",
-    "by" : "type",
-    "value" : "'NN'",
-    "name" : "filter_drop_nn"
-}
-
-MR_FILTER_KEEP_LEN6PLUS = {
-    "condition" : ">=",
-    "by" : "length",
-    "value" : 6,
-    "name" : "filter_keep_length_6plus"
-}
-
-# Partition rules
-PARTITION_RULE_USE_ALL = {
-    "name" : "partition_use_all"
-}
-
-# CONSTANTS
-TEST_GROUP_DATASET_NAME = "testGroupDataset"
+from corpus_prep_utils import task, dataset_names, filters, partition_rules
 
 def custom_agg_list(series):
     filtered_series = series.dropna()
@@ -188,8 +140,10 @@ def filter_mrs_with_statistical_significance(sequence_dataset_df, mrs_dataset_df
     return filtered_mrs_dataset_df
 
 @task(log_prints=True)
-def filter_mrs_with_query(mr_dataset_df, filter_attr, filter_condition, filter_value):
-    mr_dataset_df = mr_dataset_df.query(f"{filter_attr} {filter_condition} {filter_value}")
+def filter_mrs_with_query(mr_dataset_df, filter):
+    # escape string values with ''
+    value = f"'{filter.value}'" if isinstance(filter.value, str) else filter.value
+    mr_dataset_df = mr_dataset_df.query(f"{filter.by} {filter.condition} {value}")
     return mr_dataset_df
 
 @flow(name="Filter Maximal Repeats", log_prints=True)
@@ -197,12 +151,13 @@ def filter_maximal_repeats(mr_dataset_df, sequence_dataset_df, filter):
 
     original_length = len(mr_dataset_df)
 
-    if filter["by"] == "none":
+    if filter == filters.MR_FILTER_NONE:
         pass
-    elif filter["by"] == "significance":
+    elif filter == filters.MR_FILTER_KEEP_SIGNIFICANT:
         mr_dataset_df = filter_mrs_with_statistical_significance(sequence_dataset_df, mr_dataset_df)
     else:
-        mr_dataset_df = filter_mrs_with_query(mr_dataset_df, filter["by"], filter["condition"], filter["value"])
+        # if not special case, apply filter query with parameters
+        mr_dataset_df = filter_mrs_with_query(mr_dataset_df, filter)
     print(len(mr_dataset_df) / original_length)
     print(mr_dataset_df.head(10))
 
@@ -285,7 +240,7 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, filter, 
     # return full corpus for next step flow
     corpus_dataset = compute_bioword_partition(sequence_dataset_df, filtered_mr_dataset, partition_rule)
     
-    save_corpus_dataset(input_data_root_path, family_dataset_name, corpus_dataset, filter["name"], partition_rule["name"])
+    save_corpus_dataset(input_data_root_path, family_dataset_name, corpus_dataset, filter.name, partition_rule["name"])
 
 
 # run the flow!
@@ -296,9 +251,9 @@ if __name__=="__main__":
     
     config = dotenv_values("../.env")
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = TEST_GROUP_DATASET_NAME
-    filter = MR_FILTER_KEEP_SIGNIFICANT
-    partition_rule = PARTITION_RULE_USE_ALL
+    family_dataset_name = dataset_names.TEST_GROUP_DATASET_NAME
+    filter = filters.MR_FILTER_DROP_NE
+    partition_rule = partition_rules.PARTITION_RULE_USE_ALL
 
-    with tags(filter["name"], partition_rule["name"]):
+    with tags(filter.name, partition_rule["name"]):
         prepare_corpus(input_data_root_path, family_dataset_name, filter, partition_rule)
