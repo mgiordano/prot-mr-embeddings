@@ -38,7 +38,8 @@ def task(**task_kwargs): # Accept kwargs for @task
 # #######################################
 
 class dataset_names():
-    TEST_GROUP_DATASET_NAME = "testGroupDataset"
+    TEST_GROUP = "testGroupDataset"
+    NANO_GROUP = "nanoGroupDataset"
 
 class filters():
     MR_FILTER_NONE = MRFilter(by="none", name="filter_none")

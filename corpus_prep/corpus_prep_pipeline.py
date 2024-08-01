@@ -251,7 +251,7 @@ if __name__=="__main__":
     
     config = dotenv_values("../.env")
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = dataset_names.TEST_GROUP_DATASET_NAME
+    family_dataset_name = dataset_names.TEST_GROUP
     filter = filters.MR_FILTER_DROP_NE
     partition_rule = partition_rules.PARTITION_RULE_USE_ALL
 
