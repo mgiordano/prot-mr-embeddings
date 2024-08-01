@@ -9,11 +9,19 @@ input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
 
 @pytest.fixture
 def sequence_test_df():
-    return corpus_prep.load_sequence_dataset(input_data_root_path, dataset_names.TEST_GROUP_DATASET_NAME)
+    return corpus_prep.load_sequence_dataset(input_data_root_path, dataset_names.TEST_GROUP)
+
+@pytest.fixture
+def sequence_nano_df():
+    return corpus_prep.load_sequence_dataset(input_data_root_path, dataset_names.NANO_GROUP)
 
 @pytest.fixture
 def mr_test_df():
-    return corpus_prep.load_mr_dataset(input_data_root_path, dataset_names.TEST_GROUP_DATASET_NAME)
+    return corpus_prep.load_mr_dataset(input_data_root_path, dataset_names.TEST_GROUP)
+
+@pytest.fixture
+def mr_nano_df():
+    return corpus_prep.load_mr_dataset(input_data_root_path, dataset_names.NANO_GROUP)
 
 # #######################################
 #      INPUT DATA VALIDATION TESTS      #
@@ -38,9 +46,15 @@ def check_affected_proteins(mr_row, sequence_test_df):
     # check global affected count vs instances
     assert instances == affected_count
 
-def test_validate_mr_dataset(sequence_test_df, mr_test_df):
+def test_validate_mr_dataset_test(sequence_test_df, mr_test_df):
+    validate_mr_dataset(sequence_test_df, mr_test_df)
+
+def test_validate_mr_dataset_nano(sequence_nano_df, mr_nano_df):
+    validate_mr_dataset(sequence_nano_df, mr_nano_df)
+
+def validate_mr_dataset(sequence_df, mr_df):
     '''Test correctness of input MR dataset, mainly that for each pattern affected proteins correspond'''
-    mr_test_df.apply(check_affected_proteins, args=[sequence_test_df,], axis=1)
+    mr_df.apply(check_affected_proteins, args=[sequence_df,], axis=1)
 
 # #######################################
 #       MR FILTERS TESTS                #
@@ -88,19 +102,113 @@ def check_filtered_values(df, filter):
     assert len(filtered_mr_df) == original_size - count_value
     assert (filtered_mr_df[filter.by] == filter.value).sum() == 0
 
-def test_filter_with_query_types(mr_test_df):
-    ## Drop SMR case
-    check_filtered_values(mr_test_df, filters.MR_FILTER_DROP_SMR)
-    ## Drop NN case
-    check_filtered_values(mr_test_df, filters.MR_FILTER_DROP_NN)
-    ## Drop NE case
-    check_filtered_values(mr_test_df, filters.MR_FILTER_DROP_NE)
+def test_filter_with_query_types_test(mr_test_df):
+    validate_filter_with_query_types(mr_test_df)
 
-def test_filter_with_query_len(mr_test_df):
+def test_filter_with_query_types_nano(mr_nano_df):
+    validate_filter_with_query_types(mr_nano_df)
+
+def validate_filter_with_query_types(mr_df):
+    ## Drop SMR case
+    check_filtered_values(mr_df, filters.MR_FILTER_DROP_SMR)
+    ## Drop NN case
+    check_filtered_values(mr_df, filters.MR_FILTER_DROP_NN)
+    ## Drop NE case
+    check_filtered_values(mr_df, filters.MR_FILTER_DROP_NE)
+
+def test_filter_with_query_len_test(mr_test_df):
+    validate_filter_with_query_len(mr_test_df)
+
+def test_filter_with_query_len_nano(mr_nano_df):
+    validate_filter_with_query_len(mr_nano_df)
+
+def validate_filter_with_query_len(mr_df):
     ## Keep length >= 6 case
     filter = filters.MR_FILTER_KEEP_LEN6PLUS
-    original_size = len(mr_test_df)
-    count_value = (mr_test_df[filter.by] < filter.value).sum()
-    filtered_mr_df = corpus_prep.filter_mrs_with_query(mr_test_df, filter)
+    original_size = len(mr_df)
+    count_value = (mr_df[filter.by] < filter.value).sum()
+    filtered_mr_df = corpus_prep.filter_mrs_with_query(mr_df, filter)
     assert len(filtered_mr_df) == original_size - count_value
     assert (filtered_mr_df[filter.by] < filter.value).sum() == 0
+
+# #######################################
+#       PARTITION TESTS                 #
+# #######################################
+
+def check_matching_mrs(row, joined_df):
+    protein_id = row["protein_id"]
+    pattern = row["pattern"]
+
+    join_matching_prot_df = joined_df[(joined_df["protein_id"] == protein_id)]
+    exploded_join_matching_prot_df = join_matching_prot_df.explode("pattern_positions")
+    exploded_join_matching_prot_df['pattern'] = exploded_join_matching_prot_df["pattern_positions"].apply(lambda x: None if pd.isna(x) else x['pattern'])
+    exploded_join_matching_prot_df['starting_positions'] = exploded_join_matching_prot_df["pattern_positions"].apply(lambda x: [] if pd.isna(x) else x['starting_positions'])
+    exploded_join_matching_df = exploded_join_matching_prot_df[exploded_join_matching_prot_df["pattern"] == pattern]
+    # check there's only one row corresponding to the pattern-protein match
+    assert len(exploded_join_matching_df) == 1
+    # check index positions are well preserved
+    assert row["starting_positions"] == exploded_join_matching_df["starting_positions"].iloc[0]
+
+def test_join_test(sequence_test_df, mr_test_df):
+    # get random sample
+    sample_mr_df = mr_test_df.sample(frac=0.05)
+    validate_join(sequence_test_df, sample_mr_df)
+
+def test_join_nano(sequence_nano_df, mr_nano_df):
+    validate_join(sequence_nano_df, mr_nano_df)
+
+def validate_join(sequence_df, mr_df):
+    '''Pre condition is all MRs belong to at least one sequence but not vice versa'''
+    joined_df = corpus_prep.join_datasets(sequence_df, mr_df)
+
+    # check grouped join row count equals sequences
+    assert len(joined_df) == len(sequence_df)
+    
+    # check all sequence IDs are present after join
+    assert sequence_df["id"].nunique() == joined_df["protein_id"].nunique()
+
+    # for sequences with no matching MRs, check for 
+    # single sequence row with empty pattern_positions
+    
+    affected_protein_ids = {elem['protein_id'] for list in mr_df['affected_proteins'] for elem in list if isinstance(elem, dict)}
+    unmatched_sequence_df = sequence_df[~sequence_df["id"].isin(affected_protein_ids)]
+    assert len(unmatched_sequence_df) == joined_df["pattern_positions"].apply(lambda x: 1 if x == [] else 0).sum()
+
+    # expand and normalize joined and mr datasets
+    exploded_joined_df = joined_df.explode("pattern_positions")
+    exploded_mr_df = mr_df.explode("affected_proteins")
+    # extract columns and check for NaNs in case the join didnt match sequences with MRs
+    exploded_mr_df['protein_id'] = exploded_mr_df["affected_proteins"].apply(lambda x: None if pd.isna(x) else x['protein_id'])
+    exploded_mr_df['starting_positions'] = exploded_mr_df["affected_proteins"].apply(lambda x: [] if pd.isna(x) else x['starting_positions'])
+
+    # check all MRs are present and consistent
+    # TODO: improve check efficiency 
+    exploded_mr_df.apply(check_matching_mrs, args=(joined_df,), axis=1)
+
+    # check there are no extra rows in joined result
+    # joined dataset is at least all mr-protein combinations
+    # and at most the extra of one row per unmatched sequence
+    assert len(exploded_joined_df) == len(exploded_mr_df) + len(unmatched_sequence_df)
+
+
+def check_word_partition_order(row):
+    sequence = row["sequence"]
+    partition_matrix = row["word_partition_matrix"]
+
+    # check all positions are valid in the sequence
+    for i, pattern_positions in enumerate(partition_matrix):
+        for pattern in pattern_positions:
+            assert sequence.startswith(pattern, i)
+
+def test_compute_pattern_repeats_in_order_test(sequence_test_df, mr_test_df):
+    validate_compute_pattern_repeats_in_order(sequence_test_df, mr_test_df)
+
+def test_compute_pattern_repeats_in_order_nano(sequence_nano_df, mr_nano_df):
+    validate_compute_pattern_repeats_in_order(sequence_nano_df, mr_nano_df)
+
+def validate_compute_pattern_repeats_in_order(sequence_df, mr_df):
+    joined_df = corpus_prep.join_datasets(sequence_df, mr_df)
+    with pd.option_context("display.max_columns", None):
+        print(joined_df)
+    corpus_matrix_partition_df = corpus_prep.compute_pattern_repeats_in_order(joined_df)
+    corpus_matrix_partition_df.apply(check_word_partition_order, axis=1)
