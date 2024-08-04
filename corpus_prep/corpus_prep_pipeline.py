@@ -5,9 +5,9 @@ import pandas as pd
 import numpy as np
 import json
 from itertools import chain
-from datetime import datetime
 from dotenv import dotenv_values
-from corpus_prep_utils import task, dataset_names, filters, partition_rules
+from corpus_prep_utils import task, dataset_names, data_step_names, filters, partition_rules
+import corpus_prep_utils
 
 def custom_agg_list(series):
     filtered_series = series.dropna()
@@ -75,14 +75,9 @@ def load_mr_dataset(input_data_root_path: str, family_dataset_name: str):
     return mr_dataset_df
 
 @task(log_prints=True)
-def save_corpus_dataset(input_data_root_path: str, family_dataset_name: str, corpus_dataset, filter_name: str, partition_rule_name: str):
-    now_timestamp = datetime.now()
-    date_formatted = now_timestamp.strftime("%Y%m%d")
-    ts_formatted = now_timestamp.strftime("%Y%m%d_%H_%M_%S")
-    parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date_formatted)
-    os.makedirs(parent_folder_path, exist_ok=True)
-    write_path = os.path.join(parent_folder_path, "corpus_full_"+family_dataset_name+"_"+filter_name+"_"+partition_rule_name+"_"+ts_formatted+".csv")
-    corpus_dataset.to_csv(write_path, index=False)
+def save_results(input_data_root_path: str, family_dataset_name: str, dataset, dataset_stage: str, filter_name: str, partition_rule_name: str):
+    file_name = dataset_stage+":"+family_dataset_name+":"+filter_name+":"+partition_rule_name
+    corpus_prep_utils.save_dataset(input_data_root_path, family_dataset_name, dataset, file_name)
 
 @task(log_prints=True)
 def count_aminoacid_frequency(sequence_dataset_df):
@@ -158,9 +153,9 @@ def filter_maximal_repeats(mr_dataset_df, sequence_dataset_df, filter):
     else:
         # if not special case, apply filter query with parameters
         mr_dataset_df = filter_mrs_with_query(mr_dataset_df, filter)
+    
     print(len(mr_dataset_df) / original_length)
     print(mr_dataset_df.head(10))
-
     return mr_dataset_df
 
 @task(log_prints=True)
@@ -233,6 +228,9 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, filter, 
     # execute flow by loading datasets and applying filter rule
     # return sequences and filtered MRs for next step flow
     filtered_mr_dataset = filter_maximal_repeats(mr_dataset_df, sequence_dataset_df, filter)
+       
+    # save step 1 partial results
+    save_results(input_data_root_path, family_dataset_name, filtered_mr_dataset, data_step_names.S1_FILTERED_MR, filter.name, partition_rule["name"])
 
     # SUB FLOW 2: Compute BioWord Partition
     # apply word partitioning rule to the sequence dataset
@@ -240,7 +238,8 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, filter, 
     # return full corpus for next step flow
     corpus_dataset = compute_bioword_partition(sequence_dataset_df, filtered_mr_dataset, partition_rule)
     
-    save_corpus_dataset(input_data_root_path, family_dataset_name, corpus_dataset, filter.name, partition_rule["name"])
+    # save final step results
+    save_results(input_data_root_path, family_dataset_name, corpus_dataset, data_step_names.S3_CORPUS, filter.name, partition_rule["name"])
 
 
 # run the flow!

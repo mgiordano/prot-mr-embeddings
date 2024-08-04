@@ -1,6 +1,10 @@
 from prefect import task as prefect_task
 from functools import wraps
 from dataclasses import dataclass, field
+from datetime import datetime
+import pandas as pd
+import json
+import os
 
 @dataclass
 class MRFilter:
@@ -34,12 +38,59 @@ def task(**task_kwargs): # Accept kwargs for @task
     return decorator
 
 # #######################################
+#      I/O                              #
+# #######################################
+
+def parse_json(str):
+    try:
+        return json.loads(str)
+    except json.JSONDecodeError:
+        raise 
+
+# Function to convert nested structures to JSON strings
+def to_json(nested_data):
+    return json.dumps(nested_data)
+
+def save_dataset(input_data_root_path: str, family_dataset_name: str, dataset_df, file_name):
+    output_df = dataset_df.copy(deep=False)
+    now_timestamp = datetime.now()
+    date_formatted = now_timestamp.strftime("%Y%m%d")
+    ts_formatted = now_timestamp.strftime("%Y%m%d_%H_%M_%S")
+    parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date_formatted)
+    os.makedirs(parent_folder_path, exist_ok=True)
+    write_path = os.path.join(parent_folder_path, ts_formatted+":"+file_name+".csv")
+
+    try:
+        # Apply the function to the column with nested structure
+        output_df['affected_proteins'] = output_df['affected_proteins'].apply(to_json)
+    except:
+        pass
+
+    output_df.to_csv(write_path, index=False)
+
+def load_dataset(input_data_root_path: str, family_dataset_name: str, timestamp: str, step_name: str, filter_name: str, partition_rule_name: str):
+    date = timestamp.split("_")[0]
+    file_name = timestamp+":"+step_name+":"+family_dataset_name+":"+filter_name+":"+partition_rule_name+".csv"
+    file_path = os.path.join(input_data_root_path, family_dataset_name, date, file_name)
+    dataset_df = pd.read_csv(file_path, converters={'affected_proteins': parse_json})
+
+    #if step_name == data_step_names.S1_FILTERED_MR:
+        #dataset_df['affected_proteins'] = dataset_df['affected_proteins'].apply(parse_json)
+        #dataset_df['affected_proteins'] = pd.json_normalize(dataset_df['affected_proteins'], max_level=0) 
+    return dataset_df
+
+# #######################################
 #      CONSTANTS                        #
 # #######################################
 
 class dataset_names():
     TEST_GROUP = "testGroupDataset"
     NANO_GROUP = "nanoGroupDataset"
+    FAMILY = "familyDataset"
+
+class data_step_names():
+    S1_FILTERED_MR = "s1_filtered_mrs"
+    S3_CORPUS = "s3_corpus"
 
 class filters():
     MR_FILTER_NONE = MRFilter(by="none", name="filter_none")
