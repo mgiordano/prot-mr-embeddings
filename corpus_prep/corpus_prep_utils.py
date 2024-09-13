@@ -51,33 +51,32 @@ def parse_json(str):
 def to_json(nested_data):
     return json.dumps(nested_data)
 
-def save_dataset(input_data_root_path: str, family_dataset_name: str, dataset_df, file_name):
-    output_df = dataset_df.copy(deep=False)
+def get_date_from_formatted_ts(formatted_ts: str):
+    return formatted_ts.split("_")[0]
+
+def create_run_id(family_dataset_name: str, filter_name: str, partition_rule_name: str, separator="-"):
     now_timestamp = datetime.now()
-    date_formatted = now_timestamp.strftime("%Y%m%d")
     ts_formatted = now_timestamp.strftime("%Y%m%d_%H_%M_%S")
+    run_id = separator.join([ts_formatted, family_dataset_name, 
+              filter_name, partition_rule_name])
+    return run_id
+
+def save_local(input_data_root_path: str, family_dataset_name: str, run_id: str, dataset_df):
+    date_formatted = get_date_from_formatted_ts(run_id.split("-")[0])
     parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date_formatted)
     os.makedirs(parent_folder_path, exist_ok=True)
-    write_path = os.path.join(parent_folder_path, ts_formatted+":"+file_name+".csv")
+    file_name = run_id+".csv"
+    output_path = os.path.join(parent_folder_path, file_name)
+    dataset_df.to_csv(output_path, index=False)
+    return parent_folder_path
 
-    try:
-        # Apply the function to the column with nested structure
-        output_df['affected_proteins'] = output_df['affected_proteins'].apply(to_json)
-    except:
-        pass
+def get_file_path_by_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, step_name: str, filter_name: str, partition_rule_name: str):
+    date = get_date_from_formatted_ts(timestamp)
+    file_name = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+"-"+step_name+".csv"
+    return os.path.join(input_data_root_path, family_dataset_name, date, file_name)
 
-    output_df.to_csv(write_path, index=False)
-
-def load_dataset(input_data_root_path: str, family_dataset_name: str, timestamp: str, step_name: str, filter_name: str, partition_rule_name: str):
-    date = timestamp.split("_")[0]
-    file_name = timestamp+":"+step_name+":"+family_dataset_name+":"+filter_name+":"+partition_rule_name+".csv"
-    file_path = os.path.join(input_data_root_path, family_dataset_name, date, file_name)
-    dataset_df = pd.read_csv(file_path, converters={'affected_proteins': parse_json})
-
-    #if step_name == data_step_names.S1_FILTERED_MR:
-        #dataset_df['affected_proteins'] = dataset_df['affected_proteins'].apply(parse_json)
-        #dataset_df['affected_proteins'] = pd.json_normalize(dataset_df['affected_proteins'], max_level=0) 
-    return dataset_df
+def get_stage_run_table_name(family_dataset_name: str, timestamp: str, step_name: str, filter_name: str, partition_rule_name: str):
+    return timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+"-"+step_name
 
 # #######################################
 #      CONSTANTS                        #
@@ -90,6 +89,7 @@ class dataset_names():
 
 class data_step_names():
     S1_FILTERED_MR = "s1_filtered_mrs"
+    S2_JOINED_MR = "s2_joined_mrs"
     S3_CORPUS = "s3_corpus"
 
 class filters():

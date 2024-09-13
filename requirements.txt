@@ -1,8 +1,12 @@
 -e ../biovec
 prefect --pre
-pandas
+pandas[output-formatting]
 python-dotenv
 ipykernel
 matplotlib
 seaborn
 pytest
+duckdb
+google-cloud-storage
+google-cloud-bigquery[pandas]
+google-cloud-bigquery-storage[fastavro]
