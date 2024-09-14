@@ -41,6 +41,10 @@ def task(**task_kwargs): # Accept kwargs for @task
 #      I/O                              #
 # #######################################
 
+def print_df(dataframe, limit=10):
+    print(dataframe.head(limit).to_markdown(index=False, numalign="left", stralign="left"), end="\n")
+    print("-")
+
 def parse_json(str):
     try:
         return json.loads(str)
