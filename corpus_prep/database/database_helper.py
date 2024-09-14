@@ -238,28 +238,30 @@ class DatabaseHelper():
     
     def select_positions(self, filter="", limit=0, chain_query=False):
         table_id = f"{self.BQ_INPUT_DATASET_NAME}.{self.positions_table_name}"
-        #return self.select_from_table(table_id, filter, limit, chain_query)
-        query = f'''
-            SELECT
-                protein_id,
-                pattern_id,
-                ARRAY_AGG(position) AS starting_positions
-            FROM
-                `{table_id}`
-            GROUP BY
-            1,
-            2
-        '''
-        self.set_query(query, limit)
-        return self
+        return self.select_from_table(table_id, filter, limit, chain_query)
     
     def preview_positions(self, limit=10):
         table_id = f"{self.BQ_INPUT_DATASET_NAME}.{self.positions_table_name}"
         return self.preview_table(table_id, limit)
     
-    def select_all_patterns_positions(self, source_override="", limit=0):
-        source = f"{self.BQ_STAGE_DATASET_NAME}.{source_override}" if len(source_override) > 0 else f"{self.BQ_INPUT_DATASET_NAME}.{self.patterns_table_name}"
-        self.select_positions()
+    def select_all_patterns_positions(self, source_override="", limit=0, chain_query=False):
+        patterns_source = f"`{self.BQ_INPUT_DATASET_NAME}.{self.patterns_table_name}`"
+        if chain_query:
+            patterns_source = f"({self.CHAIN_QUERY_WILDCARD})"
+        elif len(source_override) > 0:
+            patterns_source = f"`{self.BQ_STAGE_DATASET_NAME}.{source_override}`"
+        positions_source = f"{self.BQ_INPUT_DATASET_NAME}.{self.positions_table_name}"
+        agg_positions_query = f'''
+            SELECT
+                protein_id,
+                pattern_id,
+                ARRAY_AGG(position) AS starting_positions
+            FROM
+                `{positions_source}`
+            GROUP BY
+            1,
+            2
+        '''
         query = f'''
             SELECT 
                 patterns.pattern_id,
@@ -268,15 +270,15 @@ class DatabaseHelper():
                 patterns.instances,
                 positions.protein_id,
                 positions.starting_positions
-            FROM `{source}` as patterns 
-            INNER JOIN ({self.CHAIN_QUERY_WILDCARD}) as positions 
+            FROM {patterns_source} as patterns 
+            INNER JOIN ({agg_positions_query}) as positions 
             ON patterns.pattern_id = positions.pattern_id
         '''
-        self.set_query(query, limit, chain_query=True)
+        self.set_query(query, limit, chain_query)
         return self
 
     def select_all_sequence_mrs(self, source_override="", limit=0):
-        self.select_all_patterns_positions()
+        self.select_all_patterns_positions(chain_query=True)
         query = f'''
             WITH full_seq_mrs AS (
                 SELECT 

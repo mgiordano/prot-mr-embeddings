@@ -105,6 +105,8 @@ class filters():
 
     MR_FILTER_KEEP_LEN6PLUS = MRFilter(condition= ">=", by="length", value=6, name="filter_keep_length_6plus")
 
+    MR_FILTER_DROP_ALL = MRFilter(condition= "=", by="type", value="NONE", name="filter_drop_all")
+
 class partition_rules():
     PARTITION_RULE_USE_ALL = {
         "name" : "partition_use_all"
