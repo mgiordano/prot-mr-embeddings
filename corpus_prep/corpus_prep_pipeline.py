@@ -61,7 +61,8 @@ def compute_pattern_repeats_matrix(row):
         for position in pattern_position["starting_positions"]:
             partition_matrix[position].append(pattern)
 
-    if len(pattern_list) == 0:
+    # For non matching MRs, BQ will return an array with an empty struct
+    if len(pattern_list) == 1 and len(pattern_list[0]["starting_positions"]) == 0:
         # if no matching patterns, use full sequence as only word
         partition_matrix[0].append(sequence)
     return partition_matrix
@@ -281,9 +282,9 @@ if __name__=="__main__":
 
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     family_dataset_name = dataset_names.TEST_GROUP
-    filter = filters.MR_FILTER_DROP_NE
+    filter = filters.MR_FILTER_DROP_ALL
     partition_rule = partition_rules.PARTITION_RULE_USE_ALL
-    dry_run = False
+    dry_run = True
 
     run_id = corpus_prep_utils.create_run_id(family_dataset_name, filter.name, partition_rule["name"])
     dataset_database_helper = DatabaseHelper(family_dataset_name, run_id, dry_run)
