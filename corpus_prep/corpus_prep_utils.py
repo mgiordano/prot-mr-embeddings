@@ -107,9 +107,10 @@ class filters():
 
     MR_FILTER_DROP_NN = MRFilter(condition="!=", by="type", value="NN", name="filter_drop_nn")
 
-    MR_FILTER_KEEP_LEN6PLUS = MRFilter(condition= ">=", by="length", value=6, name="filter_keep_length_6plus")
-
     MR_FILTER_DROP_ALL = MRFilter(condition= "=", by="type", value="NONE", name="filter_drop_all")
+
+    def create_filter_keep_len_plus(length: int):
+        return MRFilter(condition= ">=", by="LENGTH(pattern)", value=length, name=f"filter_keep_length_{str(length)}plus")
 
 class partition_rules():
     PARTITION_RULE_USE_ALL = {

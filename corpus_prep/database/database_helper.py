@@ -128,6 +128,7 @@ class DatabaseHelper():
             gcs_uri = self.storage_helper.upload_file(input_root_path, file_name, self.dataset_name)
 
             # Configure the job and schema options to load gcs data into bq
+            # https://cloud.google.com/bigquery/docs/reference/rest/v2/Job#jobconfigurationquery
             job_config = bigquery.LoadJobConfig()
             job_config.autodetect = True
             job_config.skip_leading_rows = 1
@@ -196,7 +197,6 @@ class DatabaseHelper():
         if limit > 0:
             query += " LIMIT " + str(limit)
         if chain_query and len(self.query) > 0:
-            #self.query = query + " FROM (" + self.query + ") as t1"
             wildcard = re.escape(self.CHAIN_QUERY_WILDCARD)
             self.query = re.sub(wildcard, self.query, query)
         else:
@@ -248,7 +248,7 @@ class DatabaseHelper():
         patterns_source = f"`{self.BQ_INPUT_DATASET_NAME}.{self.patterns_table_name}`"
         if chain_query:
             patterns_source = f"({self.CHAIN_QUERY_WILDCARD})"
-        elif len(source_override) > 0:
+        if len(source_override) > 0:
             patterns_source = f"`{self.BQ_STAGE_DATASET_NAME}.{source_override}`"
         positions_source = f"{self.BQ_INPUT_DATASET_NAME}.{self.positions_table_name}"
         agg_positions_query = f'''
@@ -277,8 +277,8 @@ class DatabaseHelper():
         self.set_query(query, limit, chain_query)
         return self
 
-    def select_all_sequence_mrs(self, source_override="", limit=0):
-        self.select_all_patterns_positions(chain_query=True)
+    def select_all_sequence_mrs(self, patterns_source_override="", limit=0, chain_query=False):
+        self.select_all_patterns_positions(patterns_source_override, chain_query)
         query = f'''
             WITH full_seq_mrs AS (
                 SELECT 

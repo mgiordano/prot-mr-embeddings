@@ -30,9 +30,18 @@ def load_positions_dataset(input_data_root_path: str, family_dataset_name: str, 
     return dataset_database_helper
 
 @task(log_prints=True)
-def save_results_from_db(db_helper, dataset_stage: str, filter_name = "", partition_rule_name = ""):
+def save_results_from_db(db_helper, dataset_stage: str, is_temp=False, cluster_columns=[], filter_name = "", partition_rule_name = ""):
     table_name = db_helper.run_id + "-" + dataset_stage
-    db_helper.save_to_table(output_table_name=table_name)
+    options = []
+    if is_temp:
+        table_name = "99_tmp-" + table_name
+        expiration_option = {
+            "key" : "expiration_timestamp",
+            "value" : "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)"
+        }
+        options.append(expiration_option)
+    db_helper.save_to_table(table_name, cluster_columns, options)
+    return table_name
 
 @task(log_prints=True)
 def save_results_from_local(db_helper, dataset_df, input_data_root_path: str, dataset_stage: str, filter_name = "", partition_rule_name = ""):
@@ -68,26 +77,19 @@ def compute_pattern_repeats_matrix(row):
     return partition_matrix
 
 @task(log_prints=True)
-def join_datasets(db_helper):
+def join_datasets(db_helper, pattern_source_table):
     
     # join patterns with the sequences they
     # appear in, providing a list of all instance positions
-    db_helper.select_all_sequence_mrs()
-
-    # trigger a result tmp save to execute and materialize
-    # intermediate results, return table_name to work with on next step
-    table_name = "99_tmp_join-" + db_helper.run_id
-    cluster_columns = ["sequence_family_name"]
-    expiration_option = {}
-    expiration_option["key"] = "expiration_timestamp"
-    expiration_option["value"] = "TIMESTAMP_ADD(CURRENT_TIMESTAMP(), INTERVAL 1 DAY)"
-    db_helper.save_to_table(table_name, cluster_columns, [expiration_option])
+    db_helper.select_all_sequence_mrs(pattern_source_table)
 
     # save step 2 partial results
     # by executing chained db operations
-    # and materializing results
-    if not db_helper.dry_run:
-        save_results_from_db(db_helper, data_step_names.S2_JOINED_MR)
+    # and materializing results for next step
+    # if dry run, save temp, if not persist
+    cluster_columns = ["sequence_family_name"]
+    table_name = save_results_from_db(db_helper, data_step_names.S2_JOINED_MR, 
+                                      is_temp=dry_run, cluster_columns=cluster_columns)
 
     return table_name
 
@@ -113,18 +115,18 @@ def flatten_partition_matrix(corpus_matrix_df):
      return corpus_matrix_df
 
 @flow(name="Compute BioWord Partition", log_prints=True)
-def compute_bioword_partition(db_helper, partition_rule):
+def compute_bioword_partition(db_helper, patterns_source_table, partition_rule):
 
-    table_name = join_datasets(db_helper)
+    joined_mrs_table_name = join_datasets(db_helper, patterns_source_table)
 
     # TODO: apply filters based on rules?
 
-    stream_reader = db_helper.stream_table(table_name, stream_rows=200)
-    corpus_matrix_partition_df = compute_pattern_repeats_in_order(stream_reader)
+    #stream_reader = db_helper.stream_table(table_name, stream_rows=200)
+    #corpus_matrix_partition_df = compute_pattern_repeats_in_order(stream_reader)
 
-    corpus_df = flatten_partition_matrix(corpus_matrix_partition_df)
-    print(corpus_df.head(10))
-    return corpus_df
+    #corpus_df = flatten_partition_matrix(corpus_matrix_partition_df)
+    #print(corpus_df.head(10))
+    #return corpus_df
 
 # #######################################
 #      SUB FLOW 1                       #
@@ -230,10 +232,9 @@ def filter_maximal_repeats(db_helper, filter):
     # save step 1 partial results
     # by executing chained db operations
     # and materializing results
-    if not db_helper.dry_run:
-        save_results_from_db(db_helper, data_step_names.S1_FILTERED_MR, filter.name, partition_rule["name"])
-
-    return db_helper
+    table_name = save_results_from_db(db_helper, data_step_names.S1_FILTERED_MR, 
+                                      is_temp=dry_run, cluster_columns=db_helper.patterns_table_cluster_columns)
+    return table_name
 
 # #######################################
 #      MAIN FLOW                        #
@@ -257,17 +258,17 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, db_helpe
     # SUB FLOW 1: Filter Maximal Repeats
     # execute flow by loading datasets and applying filter rule
     # pipeline operations are chained in the db helper
-    # but no operation is executed yet
-    db_helper = filter_maximal_repeats(db_helper, filter)
+    # and materialized into a table
+    filtered_mr_table_name = filter_maximal_repeats(db_helper, filter)
 
     # SUB FLOW 2: Compute BioWord Partition
     # apply word partitioning rule to the sequence dataset
     # joined with the filtered MRs
     # return full corpus for next step flow
-    corpus_dataset_df = compute_bioword_partition(db_helper, partition_rule)
+    corpus_dataset_df = compute_bioword_partition(db_helper, filtered_mr_table_name, partition_rule)
     
     # save final step results
-    save_results_from_local(db_helper, corpus_dataset_df, input_data_root_path, data_step_names.S3_CORPUS)
+    #save_results_from_local(db_helper, corpus_dataset_df, input_data_root_path, data_step_names.S3_CORPUS)
 
 # #######################################
 #      MAIN                             #
@@ -281,8 +282,8 @@ if __name__=="__main__":
     config = dotenv_values(dotenv_path)
 
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = dataset_names.TEST_GROUP
-    filter = filters.MR_FILTER_DROP_ALL
+    family_dataset_name = dataset_names.FAMILY
+    filter = filters.create_filter_keep_len_plus(8)
     partition_rule = partition_rules.PARTITION_RULE_USE_ALL
     dry_run = True
 
