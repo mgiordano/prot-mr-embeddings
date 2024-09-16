@@ -1,8 +1,8 @@
-from prefect import task as prefect_task
-from functools import wraps
+#from prefect import Task
+#from prefect.context import FlowRunContext
+#from prefect.utilities.asyncutils import sync_compatible
 from dataclasses import dataclass, field
 from datetime import datetime
-import pandas as pd
 import json
 import os
 
@@ -14,7 +14,7 @@ class MRFilter:
     condition: str = field(metadata={"description": "The condition operator by which to filter"}, default="")
     value: str = field(metadata={"description": "The value by which to filter the condition"}, default="")
 
-def in_prefect_flow_context():
+"""def in_prefect_flow_context():
     try:
         from prefect import context
         flow_run_ctx = context.get_run_context()
@@ -23,19 +23,23 @@ def in_prefect_flow_context():
         )  # Check if in a flow run context
     except (ImportError, AttributeError, RuntimeError):  
         return False
-    
+
+class CustomTask(Task):
+    @sync_compatible
+    async def __call__(self, *args, **kwargs):
+        #if FlowRunContext.get() is not None:
+        if in_prefect_flow_context():
+            # In a flow context, behave like a normal task
+            return await super().__call__(*args, **kwargs)
+        else:
+            return await self.fn(*args, **kwargs)
+        
 # custom task decorator to switch prefect behaviour to normal
 # when calling from outside flow
-def task(**task_kwargs): # Accept kwargs for @task
+def task(**task_kwargs):
     def decorator(func):
-        @wraps(func)
-        def wrapper(*args, **kwargs):
-            if in_prefect_flow_context():
-                return prefect_task(func, **task_kwargs)(*args, **kwargs)  # Apply with kwargs
-            else:
-                return func(*args, **kwargs)
-        return wrapper
-    return decorator
+        return CustomTask(fn=func, **task_kwargs)
+    return decorator"""
 
 # #######################################
 #      I/O                              #

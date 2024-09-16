@@ -37,7 +37,7 @@ class StorageHelper():
 class DatabaseHelper():
     # Input data group
     dataset_name = ""
-    
+    input_data_root_path = ""
     run_id = ""
 
     # GCloud
@@ -50,6 +50,7 @@ class DatabaseHelper():
     # BigQuery #
     client = None
     bqstorage_client = None
+    read_session = None
     # Dataset names
     BQ_INPUT_DATASET_NAME = "protein_input"
     BQ_CORPUS_DATASET_NAME = "protein_corpus"
@@ -77,7 +78,8 @@ class DatabaseHelper():
     # indicate wether stage results should be materialized
     dry_run = False
 
-    def __init__(self, dataset_name, run_id="", dry_run=False):
+    def __init__(self, dataset_name, input_data_root_path="", run_id="", dry_run=False):
+        self.input_data_root_path = input_data_root_path
         self.dataset_name = dataset_name
         gcloud_service_account_key_path = config["GCLOUD_SERVICE_ACCOUNT_KEY"]
         self.project_id = config["GCLOUD_PROJECT_ID"]
@@ -88,6 +90,16 @@ class DatabaseHelper():
         self.positions_table_name = self.dataset_name + self.POSITIONS_TABLE_SUFFIX
         self.run_id = run_id
         self.dry_run = dry_run
+        if dry_run:
+            self.BQ_CORPUS_DATASET_NAME += "_test"
+
+    def get_init_params(self):
+        return {
+            "input_data_root_path" : self.input_data_root_path,
+            "dataset_name" : self.dataset_name,
+            "run_id" : self.run_id,
+            "dry_run" : self.dry_run
+        }
 
     def load_sequences_dataset(self, input_root_path, file_name):
         self.load_or_create_table(input_root_path, file_name, self.BQ_INPUT_DATASET_NAME, 
@@ -152,6 +164,8 @@ class DatabaseHelper():
 
     def save_to_table(self, output_table_name, cluster_columns=[], options=[]):
         """Executes chained queries up to calling point and materializes result to table"""
+        # https://cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_table_statement
+
         table_id = f"{self.project_id}.{self.BQ_STAGE_DATASET_NAME}.{output_table_name}"
         dataset_id = f"{self.project_id}.{self.BQ_STAGE_DATASET_NAME}"
         dataset = bigquery.Dataset(dataset_id)
@@ -170,7 +184,7 @@ class DatabaseHelper():
         query += f" AS {self.query}"
         return self.execute(query_override=query)
     
-    def stream_table(self, table_name, dataset_name="", stream_rows=1):
+    def create_stream_session(self, table_name, dataset_name="", max_stream_count=1):
         """Streams tables that are very big to read in one pass"""
         # Configure the read session
         dataset_name = self.BQ_STAGE_DATASET_NAME if len(dataset_name) == 0 else dataset_name
@@ -178,16 +192,15 @@ class DatabaseHelper():
             data_format=bigquery_storage.types.DataFormat.AVRO, # Use Avro for DataFrame conversion
             table=f"projects/{self.project_id}/datasets/{dataset_name}/tables/{table_name}",
         )
-        read_session = self.bqstorage_client.create_read_session(
+        self.read_session = self.bqstorage_client.create_read_session(
             parent=f"projects/{self.project_id}",
             read_session=requested_session,
-            max_stream_count=1,
+            max_stream_count=max_stream_count,
         )
-
-        # return stream reader
-        stream = read_session.streams[0] 
-        reader = self.bqstorage_client.read_rows(stream.name)
-        return reader
+        return self.read_session
+    
+    def read_rows_from_stream(self, stream_name):
+        return self.bqstorage_client.read_rows(stream_name)
         
     def execute(self, query_override=""):
         query = query_override if len(query_override) > 0 else self.query

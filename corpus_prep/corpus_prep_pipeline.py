@@ -1,10 +1,11 @@
-from prefect import flow, tags
+from prefect import flow, tags, task
+from prefect_dask import DaskTaskRunner
 import os
 import pandas as pd
 import numpy as np
 from itertools import chain
 from dotenv import dotenv_values
-from corpus_prep_utils import task, dataset_names, data_step_names, filters, partition_rules
+from corpus_prep_utils import dataset_names, data_step_names, filters, partition_rules
 from database.database_helper import DatabaseHelper
 import corpus_prep_utils
 
@@ -46,7 +47,7 @@ def save_results_from_db(db_helper, dataset_stage: str, is_temp=False, cluster_c
 @task(log_prints=True)
 def save_results_from_local(db_helper, dataset_df, input_data_root_path: str, dataset_stage: str, filter_name = "", partition_rule_name = ""):
     run_id = db_helper.run_id + "-" + dataset_stage
-    parent_folder_path = corpus_prep_utils.save_local(input_data_root_path, family_dataset_name, run_id, dataset_df)
+    parent_folder_path = corpus_prep_utils.save_local(input_data_root_path, db_helper.dataset_name, run_id, dataset_df)
     file_name = run_id + ".csv"
     db_helper.load_or_create_table(parent_folder_path, file_name, db_helper.BQ_CORPUS_DATASET_NAME, run_id)
     
@@ -89,43 +90,50 @@ def join_datasets(db_helper, pattern_source_table):
     # if dry run, save temp, if not persist
     cluster_columns = ["sequence_family_name"]
     table_name = save_results_from_db(db_helper, data_step_names.S2_JOINED_MR, 
-                                      is_temp=dry_run, cluster_columns=cluster_columns)
+                                      is_temp=db_helper.dry_run, cluster_columns=cluster_columns)
 
     return table_name
 
 @task(log_prints=True)
-def compute_pattern_repeats_in_order(stream_reader):
+def flatten_partition_matrix(corpus_matrix_df):
+     corpus_matrix_df["word_partition"] = corpus_matrix_df["word_partition_matrix"].apply(lambda x: " ".join(list(chain.from_iterable(x))))
+     corpus_matrix_df = corpus_matrix_df.drop(columns=["word_partition_matrix"])
+     return corpus_matrix_df
+
+@task(log_prints=True)
+def compute_pattern_repeats_in_order(db_helper_init_params, stream_name, part):
+    db_helper = DatabaseHelper(dataset_name=db_helper_init_params["dataset_name"], run_id=db_helper_init_params["run_id"],
+                               dry_run=db_helper_init_params["dry_run"], input_data_root_path=db_helper_init_params["input_data_root_path"])
     processed_rows_dfs = []
     row_count = 0
+    stream_reader = db_helper.read_rows_from_stream(stream_name)
     for page in stream_reader.rows().pages:
         rows_df = page.to_dataframe()
         rows_df["word_partition_matrix"] = rows_df.apply(compute_pattern_repeats_matrix, axis=1)
         rows_df = rows_df.drop(columns=["pattern_positions"])
         processed_rows_dfs.append(rows_df)
         row_count += page.num_items
-        print("rows:" + str(row_count))
     corpus_dataset = pd.concat(processed_rows_dfs, ignore_index=True)
+    corpus_dataset = flatten_partition_matrix(corpus_dataset)
+    save_results_from_local(db_helper, corpus_dataset, db_helper.input_data_root_path, data_step_names.S3_CORPUS + "-part_" + str(part))
     return corpus_dataset
 
-@task(log_prints=True)
-def flatten_partition_matrix(corpus_matrix_df):
-     corpus_matrix_df["word_partition"] = corpus_matrix_df["word_partition_matrix"].apply(lambda x: " ".join(list(chain.from_iterable(x))))
-     corpus_matrix_df = corpus_matrix_df.drop(columns=["word_partition_matrix"])
-
-     return corpus_matrix_df
-
-@flow(name="Compute BioWord Partition", log_prints=True)
-def compute_bioword_partition(db_helper, patterns_source_table, partition_rule):
-
+@flow(name="Compute BioWord Partition", task_runner=DaskTaskRunner(cluster_kwargs={"n_workers": os.cpu_count()}), log_prints=True)
+def compute_bioword_partition(db_helper_init_params, patterns_source_table, partition_rule):
+    db_helper = DatabaseHelper(dataset_name=db_helper_init_params["dataset_name"], run_id=db_helper_init_params["run_id"],
+                               dry_run=db_helper_init_params["dry_run"], input_data_root_path=db_helper_init_params["input_data_root_path"])
     joined_mrs_table_name = join_datasets(db_helper, patterns_source_table)
 
     # TODO: apply filters based on rules?
 
-    #stream_reader = db_helper.stream_table(table_name, stream_rows=200)
-    #corpus_matrix_partition_df = compute_pattern_repeats_in_order(stream_reader)
-
-    #corpus_df = flatten_partition_matrix(corpus_matrix_partition_df)
-    #print(corpus_df.head(10))
+    read_session = db_helper.create_stream_session(joined_mrs_table_name, max_stream_count=os.cpu_count())
+    tasks = []
+    i = 0
+    for stream in read_session.streams:
+        tasks.append(compute_pattern_repeats_in_order.submit(db_helper.get_init_params(), stream.name, i))
+        i+=1
+    for task in tasks:
+        task.wait()
     #return corpus_df
 
 # #######################################
@@ -261,11 +269,16 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, db_helpe
     # and materialized into a table
     filtered_mr_table_name = filter_maximal_repeats(db_helper, filter)
 
+    # get db_helper init parameters to pass to parallel flow
+    # and re instantiate db helper in each parallel task
+    # to avoid serialization when passing full db_helper obj
+    db_helper_init_params = db_helper.get_init_params()
+    
     # SUB FLOW 2: Compute BioWord Partition
     # apply word partitioning rule to the sequence dataset
     # joined with the filtered MRs
     # return full corpus for next step flow
-    corpus_dataset_df = compute_bioword_partition(db_helper, filtered_mr_table_name, partition_rule)
+    corpus_dataset_df = compute_bioword_partition(db_helper_init_params, filtered_mr_table_name, partition_rule)
     
     # save final step results
     #save_results_from_local(db_helper, corpus_dataset_df, input_data_root_path, data_step_names.S3_CORPUS)
@@ -282,13 +295,13 @@ if __name__=="__main__":
     config = dotenv_values(dotenv_path)
 
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = dataset_names.FAMILY
+    family_dataset_name = dataset_names.TEST_GROUP
     filter = filters.create_filter_keep_len_plus(8)
     partition_rule = partition_rules.PARTITION_RULE_USE_ALL
     dry_run = True
 
     run_id = corpus_prep_utils.create_run_id(family_dataset_name, filter.name, partition_rule["name"])
-    dataset_database_helper = DatabaseHelper(family_dataset_name, run_id, dry_run)
+    dataset_database_helper = DatabaseHelper(family_dataset_name, input_data_root_path, run_id, dry_run)
 
     with tags(filter.name, partition_rule["name"]):
         prepare_corpus(input_data_root_path, family_dataset_name, dataset_database_helper, filter, partition_rule)

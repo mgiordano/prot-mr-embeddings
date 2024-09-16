@@ -1,5 +1,6 @@
 -e ../biovec
 prefect --pre
+prefect_dask
 pandas[output-formatting]
 python-dotenv
 ipykernel
