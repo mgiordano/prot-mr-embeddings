@@ -102,17 +102,17 @@ class DatabaseHelper():
         }
 
     def load_sequences_dataset(self, input_root_path, file_name):
-        self.load_or_create_table(input_root_path, file_name, self.BQ_INPUT_DATASET_NAME, 
+        self.load_or_create_table(input_root_path, file_name, self.dataset_name, self.BQ_INPUT_DATASET_NAME, 
                                   self.sequences_table_name, cluster_columns=self.sequences_table_cluster_columns)
         return self
     
     def load_patterns_dataset(self, input_dataset_path, file_name):
-        self.load_or_create_table(input_dataset_path, file_name, self.BQ_INPUT_DATASET_NAME, 
+        self.load_or_create_table(input_dataset_path, file_name, self.dataset_name, self.BQ_INPUT_DATASET_NAME, 
                                   self.patterns_table_name, cluster_columns=self.patterns_table_cluster_columns)
         return self
     
     def load_positions_dataset(self, input_dataset_path, file_name):
-        self.load_or_create_table(input_dataset_path, file_name, self.BQ_INPUT_DATASET_NAME, 
+        self.load_or_create_table(input_dataset_path, file_name, self.dataset_name, self.BQ_INPUT_DATASET_NAME, 
                                   self.positions_table_name, cluster_columns=self.positions_table_cluster_columns)
         return self
 
@@ -125,8 +125,8 @@ class DatabaseHelper():
         except NotFound:
             print(f"Table {table_id} does not exist.")
         return table_exists
-
-    def load_or_create_table(self, input_root_path, file_name, bq_dataset_name, table_name, cluster_columns=[]):
+    
+    def load_or_create_table(self, input_root_path, file_name, gcs_folder, bq_dataset_name, table_name, cluster_columns=[], gcs_uri=""):
         # load existing or create table
         table_exists = self.check_table_existence(bq_dataset_name, table_name)
         
@@ -136,14 +136,16 @@ class DatabaseHelper():
             dataset = bigquery.Dataset(dataset_id)
             dataset = self.client.create_dataset(dataset, exists_ok=True)
 
-            # load input data into cloud storage
-            gcs_uri = self.storage_helper.upload_file(input_root_path, file_name, self.dataset_name)
+            if not len(gcs_uri) > 0:
+                # load input data into cloud storage
+                gcs_uri = self.storage_helper.upload_file(input_root_path, file_name, gcs_folder)
 
             # Configure the job and schema options to load gcs data into bq
             # https://cloud.google.com/bigquery/docs/reference/rest/v2/Job#jobconfigurationquery
             job_config = bigquery.LoadJobConfig()
             job_config.autodetect = True
             job_config.skip_leading_rows = 1
+            job_config.max_bad_records = 1000000
             job_config.source_format = bigquery.SourceFormat.CSV
             if len(cluster_columns) > 0:
                 job_config.clustering_fields = cluster_columns

@@ -1,6 +1,7 @@
 from prefect import flow, tags, task
 from prefect_dask import DaskTaskRunner
 import os
+import re
 import pandas as pd
 import numpy as np
 from itertools import chain
@@ -8,6 +9,10 @@ from dotenv import dotenv_values
 from corpus_prep_utils import dataset_names, data_step_names, filters, partition_rules
 from database.database_helper import DatabaseHelper
 import corpus_prep_utils
+
+cpu_count = os.cpu_count()
+worker_count = cpu_count
+stream_count = cpu_count
 
 @task(log_prints=True)
 def load_sequence_dataset(input_data_root_path: str, family_dataset_name: str, dataset_database_helper):
@@ -49,7 +54,12 @@ def save_results_from_local(db_helper, dataset_df, input_data_root_path: str, da
     run_id = db_helper.run_id + "-" + dataset_stage
     parent_folder_path = corpus_prep_utils.save_local(input_data_root_path, db_helper.dataset_name, run_id, dataset_df)
     file_name = run_id + ".csv"
-    db_helper.load_or_create_table(parent_folder_path, file_name, db_helper.BQ_CORPUS_DATASET_NAME, run_id)
+    date = run_id.split("_")[0]
+    gcs_folder = os.path.join(db_helper.dataset_name, date)
+    # save part file in GCS
+    gcs_uri = db_helper.storage_helper.upload_file(parent_folder_path, file_name, gcs_folder)
+    # return file location for load job once all tasks have finished
+    return gcs_uri
     
 # #######################################
 #      SUB FLOW 2                       #
@@ -115,10 +125,9 @@ def compute_pattern_repeats_in_order(db_helper_init_params, stream_name, part):
         row_count += page.num_items
     corpus_dataset = pd.concat(processed_rows_dfs, ignore_index=True)
     corpus_dataset = flatten_partition_matrix(corpus_dataset)
-    save_results_from_local(db_helper, corpus_dataset, db_helper.input_data_root_path, data_step_names.S3_CORPUS + "-part_" + str(part))
-    return corpus_dataset
+    return save_results_from_local(db_helper, corpus_dataset, db_helper.input_data_root_path, data_step_names.S3_CORPUS + "-part_" + str(part))
 
-@flow(name="Compute BioWord Partition", task_runner=DaskTaskRunner(cluster_kwargs={"n_workers": os.cpu_count()}), log_prints=True)
+@flow(name="Compute BioWord Partition", task_runner=DaskTaskRunner(cluster_kwargs={"n_workers": worker_count}), log_prints=True)
 def compute_bioword_partition(db_helper_init_params, patterns_source_table, partition_rule):
     db_helper = DatabaseHelper(dataset_name=db_helper_init_params["dataset_name"], run_id=db_helper_init_params["run_id"],
                                dry_run=db_helper_init_params["dry_run"], input_data_root_path=db_helper_init_params["input_data_root_path"])
@@ -126,15 +135,20 @@ def compute_bioword_partition(db_helper_init_params, patterns_source_table, part
 
     # TODO: apply filters based on rules?
 
-    read_session = db_helper.create_stream_session(joined_mrs_table_name, max_stream_count=os.cpu_count())
+    read_session = db_helper.create_stream_session(joined_mrs_table_name, max_stream_count=stream_count)
     tasks = []
     i = 0
     for stream in read_session.streams:
         tasks.append(compute_pattern_repeats_in_order.submit(db_helper.get_init_params(), stream.name, i))
         i+=1
+    gcs_uri = ""
     for task in tasks:
         task.wait()
-    #return corpus_df
+    gcs_uri = tasks[0].result()
+    file_part_suffix = r"part_\d+\.csv$"
+    wildcard_suffix = "part_*.csv"
+    gcs_uri = re.sub(file_part_suffix, wildcard_suffix, gcs_uri)
+    db_helper.load_or_create_table("", "", "", db_helper.BQ_CORPUS_DATASET_NAME, run_id + "-" + data_step_names.S3_CORPUS, gcs_uri=gcs_uri)
 
 # #######################################
 #      SUB FLOW 1                       #
@@ -295,7 +309,7 @@ if __name__=="__main__":
     config = dotenv_values(dotenv_path)
 
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = dataset_names.TEST_GROUP
+    family_dataset_name = dataset_names.FAMILY
     filter = filters.create_filter_keep_len_plus(8)
     partition_rule = partition_rules.PARTITION_RULE_USE_ALL
     dry_run = True
