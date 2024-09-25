@@ -11,3 +11,5 @@ duckdb
 google-cloud-storage
 google-cloud-bigquery[pandas]
 google-cloud-bigquery-storage[fastavro]
+scipy<1.13
+gensim

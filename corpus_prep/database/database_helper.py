@@ -32,6 +32,23 @@ class StorageHelper():
             blob.upload_from_filename(input_file_path)
             print(f"File {input_file_path} uploaded to {destination_file_path}.")
         return f"gs://{full_gcs_path}" 
+    
+    def download_file(self, bucket_name, remote_file_name, remote_file_path, destination_root_path):
+        """Downloads a blob from the bucket."""  
+
+        storage_client = self.client
+        download_file_path = os.path.join(destination_root_path, remote_file_name)
+        full_gcs_path = os.path.join(remote_file_path, remote_file_name)
+        bucket = storage_client.bucket(bucket_name)
+        blob = bucket.blob(full_gcs_path)
+        blob.download_to_filename(download_file_path)  
+
+
+        print(
+            "Blob {} downloaded to {}.".format(
+                remote_file_name, download_file_path
+            )
+        )
 
 
 class DatabaseHelper():
@@ -165,6 +182,16 @@ class DatabaseHelper():
 
         return self
 
+    def add_options_to_query(self, query, options):
+        if len(options) > 0:
+            query += " OPTIONS("
+            option_definitions = []
+            for option in options:
+                option_definition = option["key"] + " = " + str(option["value"])
+                option_definitions.append(option_definition)
+            query += ",".join(option_definitions) + ")"
+        return query
+
     def save_to_table(self, output_table_name, cluster_columns=[], options=[]):
         """Executes chained queries up to calling point and materializes result to table"""
         # https://cloud.google.com/bigquery/docs/reference/standard-sql/data-definition-language#create_table_statement
@@ -176,14 +203,40 @@ class DatabaseHelper():
         query = f"CREATE OR REPLACE TABLE `{table_id}`"
         if len(cluster_columns) > 0:
             query += " CLUSTER BY " + ",".join(cluster_columns)    
-        if len(options) > 0:
-            query += " OPTIONS("
-            option_definitions = []
-            for option in options:
-                option_definition = option["key"] + " = " + option["value"]
-                option_definitions.append(option_definition)
-            query += ",".join(option_definitions) + ")"
+        self.add_options_to_query(query, options)
+        query += f" AS {self.query}"
+        return self.execute(query_override=query)
 
+    def export_table_to_gcs_as_csv(self, export_table_name, gcs_root_path, export_columns=["*"], file_name_suffix="", extra_options=[]):
+        """Executes chained queries up to calling point and materializes result to table"""
+        # https://cloud.google.com/bigquery/docs/reference/standard-sql/export-statements
+
+        table_id = f"{self.project_id}.{self.BQ_STAGE_DATASET_NAME}.{export_table_name}"
+        self.select_from_table(table_id, column_names=export_columns)
+        file_name = export_table_name + file_name_suffix + ".gz"
+        full_gcs_path = os.path.join("gs://", self.storage_helper.bucket_name, gcs_root_path, file_name)
+        options = [
+            {
+                "key" : "uri",
+                "value": f'"{full_gcs_path}"'
+             },
+             {
+                 "key" : "compression",
+                 "value" : '"GZIP"'
+             },
+             {
+                 "key" : "format",
+                 "value" : '"CSV"'
+             },
+             {
+                 "key" : "overwrite",
+                 "value" : 'TRUE'
+             }
+        ]
+        for extra_option in extra_options:
+            options.append(extra_option)
+        query = f"EXPORT DATA"
+        query = self.add_options_to_query(query, options)
         query += f" AS {self.query}"
         return self.execute(query_override=query)
     
@@ -208,7 +261,11 @@ class DatabaseHelper():
     def execute(self, query_override=""):
         query = query_override if len(query_override) > 0 else self.query
         query = self.udf_query + '\n' + query if len(self.udf_query) > 0 else query
-        return self.client.query_and_wait(query).to_dataframe()
+        df_result = self.client.query_and_wait(query).to_dataframe()
+        # cleanup
+        self.query = ""
+        self.udf_query = ""
+        return df_result
 
     def set_query(self, query, limit=0, chain_query=False):
         if limit > 0:
@@ -224,7 +281,7 @@ class DatabaseHelper():
         self.udf_query = udf_query
         return self
 
-    def select_from_table(self, table_id, filter, limit, chain_query=False, column_names=["*"]):
+    def select_from_table(self, table_id, filter="", limit=0, chain_query=False, column_names=["*"]):
         column_list = ",".join(column_names)
         query = f"SELECT {column_list} FROM `{table_id}`"
         if len(filter) > 0:

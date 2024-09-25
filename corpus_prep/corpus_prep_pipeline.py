@@ -1,10 +1,10 @@
 from prefect import flow, tags, task
-from prefect_dask import DaskTaskRunner
+#from prefect_dask import DaskTaskRunner
 import os
-import re
-import pandas as pd
-import numpy as np
-from itertools import chain
+#import re
+#import pandas as pd
+#import numpy as np
+#from itertools import chain
 from dotenv import dotenv_values
 from corpus_prep_utils import dataset_names, data_step_names, filters, partition_rules
 from database.database_helper import DatabaseHelper
@@ -60,6 +60,32 @@ def save_results_from_local(db_helper, dataset_df, input_data_root_path: str, da
     gcs_uri = db_helper.storage_helper.upload_file(parent_folder_path, file_name, gcs_folder)
     # return file location for load job once all tasks have finished
     return gcs_uri
+
+@task(log_prints=True)
+def export_corpus_to_gcs(db_helper, table_name):
+    gcs_root_path = os.path.join(db_helper.dataset_name, "corpus")
+
+    # export corpus for training
+    # by selecting only word partition column
+    gcs_root_path_for_train = os.path.join(gcs_root_path, "for_train")
+    export_columns = ["word_partition"]
+    # file name suffix uses wildcard
+    # to shard table export
+    train_suffix = "_for_train_*"
+    db_helper.export_table_to_gcs_as_csv(table_name, gcs_root_path_for_train, export_columns, train_suffix)
+
+    # export corpus for evaluation
+    # with all label columns and header
+    gcs_root_path_for_eval = os.path.join(gcs_root_path, "for_eval")
+    eval_suffix = "_for_eval_*"
+    extra_options = [
+        {
+            "key" : "header",
+            "value" : "TRUE"
+        }
+    ]
+    db_helper.export_table_to_gcs_as_csv(table_name, gcs_root_path_for_eval, 
+                                         file_name_suffix=eval_suffix, extra_options=extra_options)
     
 # #######################################
 #      SUB FLOW 2                       #
@@ -98,11 +124,17 @@ def compute_partition_matrix(db_helper, source_table, partition_rule):
 def compute_bioword_partition_bq(db_helper, patterns_source_table, partition_rule):
     joined_mrs_table_name = join_datasets(db_helper, patterns_source_table)
     bioword_partition_table_name = compute_partition_matrix(db_helper, joined_mrs_table_name, partition_rule)
+    
+    # export corpus to sharded files
+    # in Google Cloud Storage
+    # for further use in Corpus Train Pipeline
+    if not db_helper.dry_run:
+        export_corpus_to_gcs(db_helper, bioword_partition_table_name)
 
 # #######################################
 #     SF2 v LOCAL PARALLEL              #
 # #######################################
-
+"""
 def compute_pattern_repeats_matrix(row):
     sequence = row["sequence"]
     sequence_length = len(sequence)
@@ -170,6 +202,7 @@ def compute_bioword_partition_parallel(db_helper_init_params, patterns_source_ta
     wildcard_suffix = "part_*.csv"
     gcs_uri = re.sub(file_part_suffix, wildcard_suffix, gcs_uri)
     db_helper.load_or_create_table("", "", "", db_helper.BQ_CORPUS_DATASET_NAME, run_id + "-" + data_step_names.S3_CORPUS, gcs_uri=gcs_uri)
+"""
 
 # #######################################
 #      SUB FLOW 1                       #
