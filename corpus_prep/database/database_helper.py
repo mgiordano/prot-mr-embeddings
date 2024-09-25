@@ -74,6 +74,7 @@ class DatabaseHelper():
 
     # Queries
     query = ""
+    udf_query = ""
     CHAIN_QUERY_WILDCARD = "<CHAIN_QUERY>"
     # indicate wether stage results should be materialized
     dry_run = False
@@ -172,7 +173,7 @@ class DatabaseHelper():
         dataset_id = f"{self.project_id}.{self.BQ_STAGE_DATASET_NAME}"
         dataset = bigquery.Dataset(dataset_id)
         dataset = self.client.create_dataset(dataset, exists_ok=True)
-        query = f"CREATE TABLE `{table_id}`"
+        query = f"CREATE OR REPLACE TABLE `{table_id}`"
         if len(cluster_columns) > 0:
             query += " CLUSTER BY " + ",".join(cluster_columns)    
         if len(options) > 0:
@@ -206,6 +207,7 @@ class DatabaseHelper():
         
     def execute(self, query_override=""):
         query = query_override if len(query_override) > 0 else self.query
+        query = self.udf_query + '\n' + query if len(self.udf_query) > 0 else query
         return self.client.query_and_wait(query).to_dataframe()
 
     def set_query(self, query, limit=0, chain_query=False):
@@ -217,9 +219,14 @@ class DatabaseHelper():
         else:
             self.query = query
         return self
+    
+    def set_udf_query(self, udf_query):
+        self.udf_query = udf_query
+        return self
 
-    def select_from_table(self, table_id, filter, limit, chain_query=False):
-        query = f"SELECT * FROM `{table_id}`"
+    def select_from_table(self, table_id, filter, limit, chain_query=False, column_names=["*"]):
+        column_list = ",".join(column_names)
+        query = f"SELECT {column_list} FROM `{table_id}`"
         if len(filter) > 0:
             query += f" WHERE {filter}"
         return self.set_query(query, limit, chain_query)
@@ -320,4 +327,21 @@ class DatabaseHelper():
         '''
         self.set_query(query, limit, chain_query=True)
         print(self.query)
+        return self
+    
+    def select_bioword_partition(self, joined_mrs_source_table_name, limit=0, row_size_limit=99000000):
+        udf_file_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), 'bq_udf_compute_partition.sql'))
+        with open(udf_file_path, 'r') as f:
+            udf_query = f.read()
+            
+        query = f'''
+            SELECT
+            sequence_family_name,
+            sequence_name,
+            sequence,
+            SUBSTR(ARRAY_TO_STRING(compute_partition(sequence,
+                pattern_positions), " "), 1, {str(row_size_limit)}) as word_partition
+            FROM `{self.BQ_STAGE_DATASET_NAME}.{joined_mrs_source_table_name}`
+            '''
+        self.set_udf_query(udf_query).set_query(query, limit, chain_query=False)
         return self

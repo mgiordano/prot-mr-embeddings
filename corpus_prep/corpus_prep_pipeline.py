@@ -65,6 +65,44 @@ def save_results_from_local(db_helper, dataset_df, input_data_root_path: str, da
 #      SUB FLOW 2                       #
 # #######################################
 
+@task(log_prints=True)
+def join_datasets(db_helper, pattern_source_table):
+    
+    # join patterns with the sequences they
+    # appear in, providing a list of all instance positions
+    db_helper.select_all_sequence_mrs(pattern_source_table)
+
+    # save step 2 partial results
+    # by executing chained db operations
+    # and materializing results for next step
+    # if dry run, save temp, if not persist
+    cluster_columns = ["sequence_family_name"]
+    table_name = save_results_from_db(db_helper, data_step_names.S2_JOINED_MR, 
+                                      is_temp=db_helper.dry_run, cluster_columns=cluster_columns)
+
+    return table_name
+
+# #######################################
+#      SF2 v REMOTE BQ                  #
+# #######################################
+
+@task(log_prints=True)
+def compute_partition_matrix(db_helper, source_table, partition_rule):
+    db_helper.select_bioword_partition(source_table)
+    cluster_columns = ["sequence_family_name"]
+    table_name = save_results_from_db(db_helper, data_step_names.S3_CORPUS, 
+                                      is_temp=db_helper.dry_run, cluster_columns=cluster_columns)
+    return table_name
+
+@flow(name="Compute BioWord Partition - BQ", log_prints=True)
+def compute_bioword_partition_bq(db_helper, patterns_source_table, partition_rule):
+    joined_mrs_table_name = join_datasets(db_helper, patterns_source_table)
+    bioword_partition_table_name = compute_partition_matrix(db_helper, joined_mrs_table_name, partition_rule)
+
+# #######################################
+#     SF2 v LOCAL PARALLEL              #
+# #######################################
+
 def compute_pattern_repeats_matrix(row):
     sequence = row["sequence"]
     sequence_length = len(sequence)
@@ -86,23 +124,6 @@ def compute_pattern_repeats_matrix(row):
         # if no matching patterns, use full sequence as only word
         partition_matrix[0].append(sequence)
     return partition_matrix
-
-@task(log_prints=True)
-def join_datasets(db_helper, pattern_source_table):
-    
-    # join patterns with the sequences they
-    # appear in, providing a list of all instance positions
-    db_helper.select_all_sequence_mrs(pattern_source_table)
-
-    # save step 2 partial results
-    # by executing chained db operations
-    # and materializing results for next step
-    # if dry run, save temp, if not persist
-    cluster_columns = ["sequence_family_name"]
-    table_name = save_results_from_db(db_helper, data_step_names.S2_JOINED_MR, 
-                                      is_temp=db_helper.dry_run, cluster_columns=cluster_columns)
-
-    return table_name
 
 @task(log_prints=True)
 def flatten_partition_matrix(corpus_matrix_df):
@@ -127,8 +148,8 @@ def compute_pattern_repeats_in_order(db_helper_init_params, stream_name, part):
     corpus_dataset = flatten_partition_matrix(corpus_dataset)
     return save_results_from_local(db_helper, corpus_dataset, db_helper.input_data_root_path, data_step_names.S3_CORPUS + "-part_" + str(part))
 
-@flow(name="Compute BioWord Partition", task_runner=DaskTaskRunner(cluster_kwargs={"n_workers": worker_count}), log_prints=True)
-def compute_bioword_partition(db_helper_init_params, patterns_source_table, partition_rule):
+@flow(name="Compute BioWord Partition - Parallel", task_runner=DaskTaskRunner(cluster_kwargs={"n_workers": worker_count}), log_prints=True)
+def compute_bioword_partition_parallel(db_helper_init_params, patterns_source_table, partition_rule):
     db_helper = DatabaseHelper(dataset_name=db_helper_init_params["dataset_name"], run_id=db_helper_init_params["run_id"],
                                dry_run=db_helper_init_params["dry_run"], input_data_root_path=db_helper_init_params["input_data_root_path"])
     joined_mrs_table_name = join_datasets(db_helper, patterns_source_table)
@@ -243,7 +264,7 @@ def filter_mrs_with_query(db_helper, filter):
 def filter_maximal_repeats(db_helper, filter):
 
     if filter == filters.MR_FILTER_NONE:
-        pass
+       db_helper = db_helper.select_patterns()
     #elif filter == filters.MR_FILTER_KEEP_SIGNIFICANT:
         # TODO: review statistical filter
         #mr_dataset_df = filter_mrs_with_statistical_significance(db_helper)
@@ -292,7 +313,7 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, db_helpe
     # apply word partitioning rule to the sequence dataset
     # joined with the filtered MRs
     # return full corpus for next step flow
-    corpus_dataset_df = compute_bioword_partition(db_helper_init_params, filtered_mr_table_name, partition_rule)
+    corpus_dataset_df = compute_bioword_partition_bq(db_helper, filtered_mr_table_name, partition_rule)
     
     # save final step results
     #save_results_from_local(db_helper, corpus_dataset_df, input_data_root_path, data_step_names.S3_CORPUS)
@@ -309,8 +330,8 @@ if __name__=="__main__":
     config = dotenv_values(dotenv_path)
 
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = dataset_names.FAMILY
-    filter = filters.create_filter_keep_len_plus(8)
+    family_dataset_name = dataset_names.TEST_GROUP
+    filter = filters.MR_FILTER_NONE
     partition_rule = partition_rules.PARTITION_RULE_USE_ALL
     dry_run = True
 

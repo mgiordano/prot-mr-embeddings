@@ -101,7 +101,7 @@ class data_step_names():
     S3_CORPUS = "s3_corpus"
 
 class filters():
-    MR_FILTER_NONE = MRFilter(by="none", name="filter_none")
+    MR_FILTER_NONE = MRFilter(by="1", condition="=", value="1", name="filter_none")
 
     MR_FILTER_KEEP_SIGNIFICANT = MRFilter(condition="include", by="significance", name="filter_keep_significant")
 
