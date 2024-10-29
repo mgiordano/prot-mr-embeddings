@@ -86,6 +86,18 @@ class DatabaseHelper():
     patterns_table_cluster_columns = ["type"]
     positions_table_name = ""
     positions_table_cluster_columns = ["pattern_id", "protein_id"]
+    family_types_table_name = "family_types"
+    family_types_table_schema = [
+        {
+            'column_name' : 'family_type',
+            'column_type' : 'STRING'
+        },
+        {
+            'column_name' : 'family_name',
+            'column_type' : 'STRING'
+        },
+    ]
+    family_types_table_cluster_columns = []
 
     pattern_position_view_name = ""
 
@@ -120,6 +132,9 @@ class DatabaseHelper():
         }
 
     def load_sequences_dataset(self, input_root_path, file_name):
+        self.load_or_create_table(input_root_path, "family_types.csv", self.dataset_name, self.BQ_INPUT_DATASET_NAME, 
+                                self.family_types_table_name, cluster_columns=self.family_types_table_cluster_columns,
+                                table_schema=self.family_types_table_schema)
         self.load_or_create_table(input_root_path, file_name, self.dataset_name, self.BQ_INPUT_DATASET_NAME, 
                                   self.sequences_table_name, cluster_columns=self.sequences_table_cluster_columns)
         return self
@@ -144,7 +159,7 @@ class DatabaseHelper():
             print(f"Table {table_id} does not exist.")
         return table_exists
     
-    def load_or_create_table(self, input_root_path, file_name, gcs_folder, bq_dataset_name, table_name, cluster_columns=[], gcs_uri=""):
+    def load_or_create_table(self, input_root_path, file_name, gcs_folder, bq_dataset_name, table_name, cluster_columns=[], gcs_uri="", table_schema=[]):
         # load existing or create table
         table_exists = self.check_table_existence(bq_dataset_name, table_name)
         
@@ -161,7 +176,13 @@ class DatabaseHelper():
             # Configure the job and schema options to load gcs data into bq
             # https://cloud.google.com/bigquery/docs/reference/rest/v2/Job#jobconfigurationquery
             job_config = bigquery.LoadJobConfig()
-            job_config.autodetect = True
+            if len(table_schema) > 0:
+                schema = []
+                for column_schema in table_schema:
+                    schema.append(bigquery.SchemaField(column_schema["column_name"], column_schema["column_type"]))
+                job_config.schema = schema
+            else:
+                job_config.autodetect = True
             job_config.skip_leading_rows = 1
             job_config.max_bad_records = 1000000
             job_config.source_format = bigquery.SourceFormat.CSV
@@ -203,7 +224,7 @@ class DatabaseHelper():
         query = f"CREATE OR REPLACE TABLE `{table_id}`"
         if len(cluster_columns) > 0:
             query += " CLUSTER BY " + ",".join(cluster_columns)    
-        self.add_options_to_query(query, options)
+        query = self.add_options_to_query(query, options)
         query += f" AS {self.query}"
         return self.execute(query_override=query)
 
@@ -393,12 +414,16 @@ class DatabaseHelper():
             
         query = f'''
             SELECT
-            sequence_family_name,
-            sequence_name,
-            sequence,
+            joined_patterns.sequence_family_name AS sequence_family_name,
+            family_types.family_type AS sequence_family_type,
+            joined_patterns.sequence_name AS sequence_name,
+            joined_patterns.sequence AS sequence,
             SUBSTR(ARRAY_TO_STRING(compute_partition(sequence,
                 pattern_positions), " "), 1, {str(row_size_limit)}) as word_partition
-            FROM `{self.BQ_STAGE_DATASET_NAME}.{joined_mrs_source_table_name}`
+            FROM `{self.BQ_STAGE_DATASET_NAME}.{joined_mrs_source_table_name}` AS joined_patterns
+            INNER JOIN
+                `{self.BQ_INPUT_DATASET_NAME}.{self.family_types_table_name}` as family_types
+            ON joined_patterns.sequence_family_name = family_types.family_name
             '''
         self.set_udf_query(udf_query).set_query(query, limit, chain_query=False)
         return self
