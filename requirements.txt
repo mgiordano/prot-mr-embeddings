@@ -1,5 +1,5 @@
 -e ../biovec
-prefect --pre
+prefect
 prefect_dask
 pandas[output-formatting]
 python-dotenv
