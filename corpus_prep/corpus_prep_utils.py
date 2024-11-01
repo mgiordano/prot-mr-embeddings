@@ -5,6 +5,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 import json
 import os
+from gensim.utils import tokenize
+from gensim import utils
+from database.storage_helper import StorageHelper
 
 @dataclass
 class MRFilter:
@@ -44,6 +47,20 @@ def task(**task_kwargs):
 # #######################################
 #      I/O                              #
 # #######################################
+
+class RunFilesCorpus:
+    def __init__(self, corpus_folder_path, run_file_prefix):
+        self.path = corpus_folder_path
+        self.prefix_filter = run_file_prefix
+
+    def __iter__(self):
+        for filename in os.listdir(self.path):
+            file_path = os.path.join(self.path, filename)
+            if filename.startswith(self.prefix_filter):
+                if os.path.isfile(file_path):  # Make sure it's a file
+                    with utils.open(file_path, 'r', encoding='utf-8') as fin:
+                        for line in fin:
+                            yield list(tokenize(line))
 
 def print_df(dataframe, limit=10):
     print(dataframe.head(limit).to_markdown(index=False, numalign="left", stralign="left"), end="\n")
@@ -85,6 +102,11 @@ def get_file_path_by_run(input_data_root_path: str, family_dataset_name: str, ti
 
 def get_stage_run_table_name(family_dataset_name: str, timestamp: str, step_name: str, filter_name: str, partition_rule_name: str):
     return timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+"-"+step_name
+
+def get_model_path_by_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+    date = get_date_from_formatted_ts(timestamp)
+    file_name = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+".model"
+    return os.path.join(input_data_root_path, family_dataset_name, date, "models", file_name)
 
 # #######################################
 #      CONSTANTS                        #

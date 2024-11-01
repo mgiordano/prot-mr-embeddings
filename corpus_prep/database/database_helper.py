@@ -1,55 +1,15 @@
-from google.cloud import storage
 from google.cloud import bigquery
 from google.cloud import bigquery_storage
 from google.cloud.exceptions import NotFound
 from dotenv import dotenv_values
 import re
 import os
+from .storage_helper import StorageHelper
 
 #travels up two levels to find the .env
 dotenv_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', '..', '.env'))
 print(dotenv_path)
 config = dotenv_values(dotenv_path)
-
-class StorageHelper():
-    
-    client = None
-    
-    def __init__(self):
-        gcloud_service_account_key_path = config["GCLOUD_SERVICE_ACCOUNT_KEY"]
-        os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = config["GCLOUD_SERVICE_ACCOUNT_KEY"]
-        self.client = storage.Client.from_service_account_json(gcloud_service_account_key_path)
-        self.bucket_name = config["GCLOUD_INPUT_BUCKET"]
-    
-    def upload_file(self, input_root_path, file_name, destination_root_path):
-        """Uploads a file to the bucket."""
-        input_file_path = os.path.join(input_root_path, file_name)
-        destination_file_path = os.path.join(destination_root_path, file_name)
-        full_gcs_path = os.path.join(self.bucket_name, destination_file_path)
-        bucket = self.client.bucket(self.bucket_name)
-        blob = bucket.blob(destination_file_path)
-        if not blob.exists():
-            blob.upload_from_filename(input_file_path)
-            print(f"File {input_file_path} uploaded to {destination_file_path}.")
-        return f"gs://{full_gcs_path}" 
-    
-    def download_file(self, bucket_name, remote_file_name, remote_file_path, destination_root_path):
-        """Downloads a blob from the bucket."""  
-
-        storage_client = self.client
-        download_file_path = os.path.join(destination_root_path, remote_file_name)
-        full_gcs_path = os.path.join(remote_file_path, remote_file_name)
-        bucket = storage_client.bucket(bucket_name)
-        blob = bucket.blob(full_gcs_path)
-        blob.download_to_filename(download_file_path)  
-
-
-        print(
-            "Blob {} downloaded to {}.".format(
-                remote_file_name, download_file_path
-            )
-        )
-
 
 class DatabaseHelper():
     # Input data group
