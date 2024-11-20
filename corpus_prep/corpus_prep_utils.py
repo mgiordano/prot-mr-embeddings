@@ -7,7 +7,6 @@ import json
 import os
 from gensim.utils import tokenize
 from gensim import utils
-from database.storage_helper import StorageHelper
 
 @dataclass
 class MRFilter:
@@ -56,11 +55,12 @@ class RunFilesCorpus:
     def __iter__(self):
         for filename in os.listdir(self.path):
             file_path = os.path.join(self.path, filename)
-            if filename.startswith(self.prefix_filter):
+            if filename.startswith(self.prefix_filter) and filename.endswith(".csv"):
                 if os.path.isfile(file_path):  # Make sure it's a file
-                    with utils.open(file_path, 'r', encoding='utf-8') as fin:
-                        for line in fin:
-                            yield list(tokenize(line))
+                    yield file_path
+                    #with utils.open(file_path, 'r', encoding='utf-8') as fin:
+                        #for line in fin:
+                            #yield list(tokenize(line))
 
 def print_df(dataframe, limit=10):
     print(dataframe.head(limit).to_markdown(index=False, numalign="left", stralign="left"), end="\n")
@@ -107,6 +107,16 @@ def get_model_path_by_run(input_data_root_path: str, family_dataset_name: str, t
     date = get_date_from_formatted_ts(timestamp)
     file_name = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+".model"
     return os.path.join(input_data_root_path, family_dataset_name, date, "models", file_name)
+
+def count_lines(filename):
+    with utils.open(filename, 'r', encoding='utf-8') as f:
+        word_count = 0
+        line_count = 0
+        for line in f:
+            line_count += 1
+            word_count += len(list(tokenize(line)))
+        return line_count, word_count
+            
 
 # #######################################
 #      CONSTANTS                        #

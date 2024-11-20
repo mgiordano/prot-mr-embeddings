@@ -1,6 +1,5 @@
 import os
 from dotenv import dotenv_values
-from pprint import pprint as print
 from gensim.models.fasttext import FastText
 from prefect import flow, tags, task
 from corpus_prep_utils import dataset_names, data_step_names, filters, partition_rules, RunFilesCorpus
@@ -19,6 +18,27 @@ def get_corpus_file_iterator_from_run(input_data_root_path: str, family_dataset_
     return RunFilesCorpus(parent_path, file_name_prefix)
 
 @task(log_prints=True)
+def create_or_load_joined_corpus_file(run_files_iterator):
+    joined_file_name = run_files_iterator.prefix_filter + "joined.csv"
+    joined_file_path = os.path.join(run_files_iterator.path, joined_file_name)
+    if not os.path.exists(joined_file_path):
+        # Open the output file in write mode
+        with open(joined_file_path, "w", encoding='utf-8') as outfile:
+            i = 0
+            # Iterate over the files, skipping the header in all but the first file
+            for file in run_files_iterator:
+                if not file.endswith("joined.csv"):
+                    with open(file, 'r', encoding='utf-8') as infile:
+                        print(f"Joining file {file}")
+                        if i > 0:  # Skip header row for all but the first file
+                            next(infile)
+                        for line in infile:
+                            outfile.write(line)
+                        i+=1
+    return joined_file_path
+
+
+@task(log_prints=True)
 def save_model(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str, model):
     date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
     parent_path = os.path.join(input_data_root_path, family_dataset_name, date, "models")
@@ -29,19 +49,25 @@ def save_model(input_data_root_path: str, family_dataset_name: str, timestamp: s
     return file_path
 
 @task(log_prints=True)
-def build_model_vocabulary(model, corpus):
-    model.build_vocab(corpus_iterable=corpus)
+def count_file_sentences_words(file_path):
+    return corpus_prep_utils.count_lines(file_path)
+
+@task(log_prints=True)
+def build_model_vocabulary(corpus_file_path, model, is_update=False):
+    model.build_vocab(corpus_file=corpus_file_path, update=is_update)
     return model
 
 @task(log_prints=True)
-def train_model(model, corpus):
-    model.train(
-        corpus_iterable=corpus, epochs=model.epochs,
-        total_examples=model.corpus_count, total_words=model.corpus_total_words
+def train_model(corpus_file_path, model, epochs=5, total_examples_count=0, total_words_count=0):
+    total_examples_count = model.corpus_count if total_examples_count == 0 else total_examples_count
+    total_words_count = model.corpus_total_words if total_words_count == 0 else total_words_count
+    print(f"Starting training. Total examples seen: {model.corpus_count}, Total words seen: {model.corpus_total_words}")
+    trained_word_count, raw_word_count = model.train(
+        corpus_file=corpus_file_path, epochs=epochs,
+        total_words=total_words_count, total_examples=total_examples_count
     )
-    print(model)
+    print(f"Trained {trained_word_count} words. Raw word count {raw_word_count}")
     return model
-
 
 # #######################################
 #      MAIN FLOW                        #
@@ -49,24 +75,52 @@ def train_model(model, corpus):
 
 @flow(name="Train BioWord Protein Corpus", log_prints=True)
 def train_corpus(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+    # get file corpus iterable for desired run output 
+    corpus_file_iterator = get_corpus_file_iterator_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    
+    corpus_path = create_or_load_joined_corpus_file(corpus_file_iterator)
+    
+    # it seems paralell training works only with hs=1 and negative=0
+    model = FastText(vector_size=100, workers=cpu_count, hs=1, negative=0)
+
+    model = build_model_vocabulary(corpus_path, model)
+    
+    path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
+    
+    model = train_model(corpus_path, model)
+
+    path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
+
+    print(f"Saved trained model {path}")
+
+@flow(name="Train BioWord Protein Corpus", log_prints=True)
+def train_corpus_iteratively(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
     
     # get file corpus iterable for desired run output 
     corpus = get_corpus_file_iterator_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
-
+    print("Loaded corpus iterable")
+    i = 0
+    path = ''
     # it seems paralell training works only with hs=1 and negative=0
     model = FastText(vector_size=100, workers=cpu_count, hs=1, negative=0)
-    
-    model = build_model_vocabulary(model, corpus)
-
-    path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
+    for file in corpus:
+        print(f"Processing corpus file {i}")
+        update = False if i == 0 else True
+        model = model if i == 0 else FastText.load(path)
+        total_examples, total_words = count_file_sentences_words(file)
+        print(f"{total_examples} examples and {total_words} unique words in corpus file {i}")
+        model = build_model_vocabulary(file, model, update)
+        model = train_model(file, total_examples, total_words, model)
+        path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
+        i+=1
+    print(f"Finished training. Total examples seen: {model.corpus_count}, Total words seen: {model.corpus_total_words}")
+    return model
 
     #model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, dataset_names.TEST_GROUP, "20241029_15_41_02", 
     #                                                 filters.MR_FILTER_NONE.name, partition_rules.PARTITION_RULE_USE_ALL["name"] )
     #model = FastText.load(model_path)
 
-    model = train_model(model, corpus)
-
-    path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
+    #path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
 
 # #######################################
 #      MAIN                             #
@@ -82,6 +136,7 @@ if __name__=="__main__":
     # set run data to work on
     family_dataset_name = dataset_names.FAMILY
     timestamp = "20241030_11_14_21"
+    #timestamp = "20241029_15_41_02"
     filter_name = filters.MR_FILTER_NONE.name
     partition_rule_name = partition_rules.PARTITION_RULE_USE_ALL["name"]
     

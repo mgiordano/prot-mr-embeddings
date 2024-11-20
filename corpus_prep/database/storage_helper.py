@@ -1,5 +1,7 @@
 from google.cloud import storage
 from dotenv import dotenv_values
+import pandas as pd
+import re
 import os
 
 #travels up two levels to find the .env
@@ -44,10 +46,18 @@ class StorageHelper():
             return  # return without downloading
 
         blob.download_to_filename(download_file_path)  
-
         print(
             "Blob {} downloaded to {}.".format(
                 remote_file_name, download_file_path
+            )
+        )
+        # decompress gz file
+        df = pd.read_csv(download_file_path, compression='gzip')
+        uncompressed_file_path = re.sub(r"\.gz$", ".csv", download_file_path)
+        df.to_csv(uncompressed_file_path, index=False, encoding="utf-8")
+        print(
+            "Decompressed {} to {}.".format(
+                remote_file_name, uncompressed_file_path
             )
         )
 
