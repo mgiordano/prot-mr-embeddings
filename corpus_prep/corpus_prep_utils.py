@@ -7,6 +7,7 @@ import json
 import os
 from gensim.utils import tokenize
 from gensim import utils
+from database.storage_helper import StorageHelper
 
 @dataclass
 class MRFilter:
@@ -103,9 +104,10 @@ def get_file_path_by_run(input_data_root_path: str, family_dataset_name: str, ti
 def get_stage_run_table_name(family_dataset_name: str, timestamp: str, step_name: str, filter_name: str, partition_rule_name: str):
     return timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+"-"+step_name
 
-def get_model_path_by_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+def get_model_path_by_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str, load_vectors=False):
     date = get_date_from_formatted_ts(timestamp)
     file_name = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+".model"
+    file_name += ".wv.vectors_ngrams.kv" if load_vectors else ""
     return os.path.join(input_data_root_path, family_dataset_name, date, "models", file_name)
 
 def count_lines(filename):
@@ -116,7 +118,33 @@ def count_lines(filename):
             line_count += 1
             word_count += len(list(tokenize(line)))
         return line_count, word_count
-            
+    
+def get_corpus_file_iterator_from_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str, is_for_train=True):
+    date = get_date_from_formatted_ts(timestamp)
+    corpus_type = "for_train" if is_for_train else "for_eval"
+    file_name_prefix = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+"-"+data_step_names.S3_CORPUS+"_"+corpus_type+"_"
+    parent_path = os.path.join(input_data_root_path, family_dataset_name, date)
+    StorageHelper().download_files_matching_prefix("processed_proteins", file_name_prefix, family_dataset_name+"/corpus/"+corpus_type, parent_path)
+    return RunFilesCorpus(parent_path, file_name_prefix)
+
+def create_or_load_joined_corpus_file(run_files_iterator):
+    joined_file_name = run_files_iterator.prefix_filter + "joined.csv"
+    joined_file_path = os.path.join(run_files_iterator.path, joined_file_name)
+    if not os.path.exists(joined_file_path):
+        # Open the output file in write mode
+        with open(joined_file_path, "w", encoding='utf-8') as outfile:
+            i = 0
+            # Iterate over the files, skipping the header in all but the first file
+            for file in run_files_iterator:
+                if not file.endswith("joined.csv"):
+                    with open(file, 'r', encoding='utf-8') as infile:
+                        print(f"Joining file {file}")
+                        if i > 0:  # Skip header row for all but the first file
+                            next(infile)
+                        for line in infile:
+                            outfile.write(line)
+                        i+=1
+    return joined_file_path
 
 # #######################################
 #      CONSTANTS                        #

@@ -1,4 +1,3 @@
--e ../biovec
 prefect
 prefect_dask
 pandas[output-formatting]
@@ -13,3 +12,4 @@ google-cloud-bigquery[pandas]
 google-cloud-bigquery-storage[fastavro]
 scipy<1.13
 gensim
+scikit-learn

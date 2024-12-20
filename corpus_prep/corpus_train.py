@@ -2,41 +2,18 @@ import os
 from dotenv import dotenv_values
 from gensim.models.fasttext import FastText
 from prefect import flow, tags, task
-from corpus_prep_utils import dataset_names, data_step_names, filters, partition_rules, RunFilesCorpus
-from database.storage_helper import StorageHelper
+from corpus_prep_utils import dataset_names, filters, partition_rules
 import corpus_prep_utils
 
 cpu_count = os.cpu_count()
 
 @task(log_prints=True)
 def get_corpus_file_iterator_from_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
-    date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
-    file_name_prefix = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name+"-"+data_step_names.S3_CORPUS+"_for_train_"
-    parent_path = os.path.join(input_data_root_path, family_dataset_name, date)
-    storage_helper = StorageHelper()
-    storage_helper.download_files_matching_prefix("processed_proteins", file_name_prefix, family_dataset_name+"/corpus/for_train", parent_path)
-    return RunFilesCorpus(parent_path, file_name_prefix)
+    return corpus_prep_utils.get_corpus_file_iterator_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
 
 @task(log_prints=True)
 def create_or_load_joined_corpus_file(run_files_iterator):
-    joined_file_name = run_files_iterator.prefix_filter + "joined.csv"
-    joined_file_path = os.path.join(run_files_iterator.path, joined_file_name)
-    if not os.path.exists(joined_file_path):
-        # Open the output file in write mode
-        with open(joined_file_path, "w", encoding='utf-8') as outfile:
-            i = 0
-            # Iterate over the files, skipping the header in all but the first file
-            for file in run_files_iterator:
-                if not file.endswith("joined.csv"):
-                    with open(file, 'r', encoding='utf-8') as infile:
-                        print(f"Joining file {file}")
-                        if i > 0:  # Skip header row for all but the first file
-                            next(infile)
-                        for line in infile:
-                            outfile.write(line)
-                        i+=1
-    return joined_file_path
-
+    return corpus_prep_utils.create_or_load_joined_corpus_file(run_files_iterator)
 
 @task(log_prints=True)
 def save_model(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str, model):
