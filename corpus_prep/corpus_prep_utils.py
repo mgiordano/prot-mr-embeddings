@@ -180,3 +180,7 @@ class partition_rules():
     PARTITION_RULE_USE_ALL = {
         "name" : "partition_use_all"
     }
+
+class bioword_rules():
+    BIOWORD_RULE_PARTITION_COLUMN = "word_partition"
+    BIOWORD_RULE_SEQ_COLUMN = "sequence"

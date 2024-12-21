@@ -6,6 +6,13 @@ from corpus_prep_utils import dataset_names, filters, partition_rules
 import corpus_prep_utils
 
 cpu_count = os.cpu_count()
+VECTOR_SIZE = 100
+
+@task(log_prints=True)
+def get_corpus_train_file_path_from_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+    corpus_file_iterator = corpus_prep_utils.get_corpus_file_iterator_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    corpus_path = corpus_prep_utils.create_or_load_joined_corpus_file(corpus_file_iterator)
+    return corpus_path
 
 @task(log_prints=True)
 def get_corpus_file_iterator_from_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
@@ -53,16 +60,15 @@ def train_model(corpus_file_path, model, epochs=5, total_examples_count=0, total
 @flow(name="Train BioWord Protein Corpus", log_prints=True)
 def train_corpus(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
     # get file corpus iterable for desired run output 
-    corpus_file_iterator = get_corpus_file_iterator_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
-    
-    corpus_path = create_or_load_joined_corpus_file(corpus_file_iterator)
+    corpus_path = get_corpus_train_file_path_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
     
     # it seems paralell training works only with hs=1 and negative=0
-    model = FastText(vector_size=100, workers=cpu_count, hs=1, negative=0)
+    model = FastText(vector_size=VECTOR_SIZE, workers=cpu_count, hs=1, negative=0)
 
     model = build_model_vocabulary(corpus_path, model)
     
-    path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
+    # optional intermediate save as checkpoint for built vocabulary
+    #path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
     
     model = train_model(corpus_path, model)
 
@@ -111,9 +117,9 @@ if __name__=="__main__":
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     
     # set run data to work on
-    family_dataset_name = dataset_names.FAMILY
-    timestamp = "20241030_11_14_21"
-    #timestamp = "20241029_15_41_02"
+    family_dataset_name = dataset_names.TEST_GROUP
+    #timestamp = "20241030_11_14_21"
+    timestamp = "20241029_15_41_02"
     filter_name = filters.MR_FILTER_NONE.name
     partition_rule_name = partition_rules.PARTITION_RULE_USE_ALL["name"]
     
