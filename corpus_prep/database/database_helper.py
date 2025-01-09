@@ -8,7 +8,6 @@ from .storage_helper import StorageHelper
 
 #travels up two levels to find the .env
 dotenv_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', '..', '.env'))
-print(dotenv_path)
 config = dotenv_values(dotenv_path)
 
 class DatabaseHelper():
