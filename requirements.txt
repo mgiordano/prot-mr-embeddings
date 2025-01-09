@@ -13,3 +13,5 @@ google-cloud-bigquery-storage[fastavro]
 scipy<1.13
 gensim
 scikit-learn
+tensorflow
+tensorboard
