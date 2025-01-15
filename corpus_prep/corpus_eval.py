@@ -1,3 +1,4 @@
+import sys
 import os
 from dotenv import dotenv_values
 import logging
@@ -35,7 +36,7 @@ def compute_tsne(vectors, tsne_parameters):
 def compute_pca(vector_list, pca_parameters):
     logging.info("START TASK - compute_pca")
     # Apply PCA for initial dimensionality reduction
-    pca = PCA(n_components=pca_parameters["n_componenets"])
+    pca = PCA(n_components=pca_parameters["n_components"])
     reduced_vectors = pca.fit_transform(vector_list)
     
     logging.info("END TASK - compute_pca")
@@ -123,28 +124,28 @@ def eval_corpus(input_data_root_path, family_dataset_name, timestamp, filter_nam
     metadata_df.to_csv(metadata_out_path, sep='\t', index=False)
     logging.info("END TASK -  save metadata.tsv")
 
-    logging.info("START TASK -  save vectors-bio.tsv")
+    logging.info("START TASK -  save vectors_bio.tsv")
     # Create biovectors dataframe by unnesting the vector column
     biovector_list = corpus_df["bio_vector"].tolist()
     biovectors_df = pd.DataFrame(
         biovector_list,
         columns=[f'dim_{i}' for i in range(len(corpus_df["bio_vector"].iloc[0]))]
     )
-    biovector_filename = filename_prefix + "-vectors-bio.tsv"
+    biovector_filename = filename_prefix + "-vectors_bio.tsv"
     biovectors_out_path = os.path.join(parent_folder_path, biovector_filename)
     biovectors_df.to_csv(biovectors_out_path, sep='\t', header=False, index=False, float_format='%.20f')
     del biovectors_df
-    logging.info("END TASK -  save vectors-bio.tsv")
+    logging.info("END TASK -  save vectors_bio.tsv")
 
     # Apply PCA to do a more efficient and first dimensionality reduction
     pca_reduced_vectors = compute_pca(biovector_list, pca_parameters)
 
-    logging.info("START TASK -  save vectors-pca.tsv")
+    logging.info("START TASK -  save vectors_pca.tsv")
     # Save reduced PCA vectors as intermediate result
-    pca_filename = filename_prefix + "-vectors-pca.tsv"
+    pca_filename = filename_prefix + "-vectors_pca.tsv"
     pca_out_path = os.path.join(parent_folder_path, pca_filename)
     np.savetxt(pca_out_path, pca_reduced_vectors, delimiter='\t', fmt='%.20f')
-    logging.info("END TASK -  save vectors-pca.tsv")
+    logging.info("END TASK -  save vectors_pca.tsv")
     
     # Apply TSNE to do final dimensionality reduction to 2D
     tsne_reduced_vectors = compute_tsne(pca_reduced_vectors, tsne_parameters)
@@ -152,7 +153,7 @@ def eval_corpus(input_data_root_path, family_dataset_name, timestamp, filter_nam
     corpus_df[['reduced_vector_d1', 'reduced_vector_d2']] = tsne_reduced_vectors
 
     # save df
-    df_out_file_suffix = f"-s4_corpus_bio_vector_pca_{pca_parameters["n_components"]}_tsne_{tsne_parameters["perplexity"]}_{tsne_parameters["learning_rate"]}.csv"
+    df_out_file_suffix = f"-s4_corpus_bio_vector_pca_{pca_parameters['n_components']}_tsne_{tsne_parameters['perplexity']}_{tsne_parameters['learning_rate']}.csv"
     df_out_filename = filename_prefix + df_out_file_suffix
     df_out_path = os.path.join(parent_folder_path, df_out_filename)
     corpus_df.to_csv(df_out_path, float_format='%.20f', index=False)
@@ -170,6 +171,12 @@ if __name__=="__main__":
     dotenv_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', '.env'))
     config = dotenv_values(dotenv_path)
 
+    # arguments
+    arguments = len(sys.argv) - 1
+    if(arguments!=4):
+        print("Usage: python corpus_eval.py <family_dataset_name> <timestamp> <filter_name> <partition_rule_name>") 
+        quit()
+
     # Configure logging
     logging.basicConfig(
         filename='corpus_eval.log',
@@ -181,10 +188,10 @@ if __name__=="__main__":
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     # set run data to work on
-    family_dataset_name = config["CORPUS_EVAL_FAMILY_DATASET_NAME"]
-    timestamp = config["CORPUS_EVAL_TIMESTAMP"]
-    filter_name = config["CORPUS_EVAL_FILTER_NAME"]
-    partition_rule_name = config["CORPUS_EVAL_PARTITION_RULE_NAME"]
+    family_dataset_name = sys.argv[1]
+    timestamp = sys.argv[2]
+    filter_name = sys.argv[3]
+    partition_rule_name = sys.argv[4]
 
     # create output structure
     date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
@@ -195,7 +202,7 @@ if __name__=="__main__":
     # model evaluation parameters
     bioword_rule_column = bioword_rules.BIOWORD_RULE_PARTITION_COLUMN
     pca_parameters = {
-        "n_componenets" : int(VECTOR_SIZE / 2) # 50
+        "n_components" : int(VECTOR_SIZE / 2) # 50
     }
     tsne_parameters = {
         "n_components" : 2,
