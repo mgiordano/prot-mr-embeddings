@@ -3,6 +3,7 @@ import numpy as np
 from tensorboard.plugins import projector
 import json
 import os
+import sys
 from dotenv import dotenv_values
 import corpus_prep_utils
 
@@ -59,13 +60,19 @@ if __name__ == "__main__":
     dotenv_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', '.env'))
     config = dotenv_values(dotenv_path)
 
+    # arguments
+    arguments = len(sys.argv) - 1
+    if(arguments!=4):
+        print("Usage: python corpus_eval.py <family_dataset_name> <timestamp> <filter_name> <partition_rule_name>") 
+        quit()
+
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     # set run data to work on
-    family_dataset_name = config["CORPUS_EVAL_FAMILY_DATASET_NAME"]
-    timestamp = config["CORPUS_EVAL_TIMESTAMP"]
-    filter_name = config["CORPUS_EVAL_FILTER_NAME"]
-    partition_rule_name = config["CORPUS_EVAL_PARTITION_RULE_NAME"]
+    family_dataset_name = sys.argv[1]
+    timestamp = sys.argv[2]
+    filter_name = sys.argv[3]
+    partition_rule_name = sys.argv[4]
 
     date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
     parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date, "vector_output")
