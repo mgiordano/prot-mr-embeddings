@@ -62,23 +62,24 @@ if __name__ == "__main__":
 
     # arguments
     arguments = len(sys.argv) - 1
-    if(arguments!=4):
-        print("Usage: python corpus_eval.py <family_dataset_name> <timestamp> <filter_name> <partition_rule_name>") 
+    if(arguments!=5):
+        print("Usage: python tensorboard_setup.py <pca|tnse> <family_dataset_name> <timestamp> <filter_name> <partition_rule_name>") 
         quit()
 
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
     # set run data to work on
-    family_dataset_name = sys.argv[1]
-    timestamp = sys.argv[2]
-    filter_name = sys.argv[3]
-    partition_rule_name = sys.argv[4]
+    reduce_method = sys.argv[1]
+    family_dataset_name = sys.argv[2]
+    timestamp = sys.argv[3]
+    filter_name = sys.argv[4]
+    partition_rule_name = sys.argv[5]
 
     date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
     parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date, "vector_output")
     filename_prefix = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name
-
-    vectors_file = os.path.join(parent_folder_path, filename_prefix+"-vectors_pca.tsv")  # Path to your vectors.tsv
+    vectors_file_suffix = f"-vectors_{reduce_method}.tsv"
+    vectors_file = os.path.join(parent_folder_path, filename_prefix+vectors_file_suffix)  # Path to your vectors.tsv
     metadata_file = os.path.join(parent_folder_path, filename_prefix+"-metadata.tsv")  # Path to your metadata.tsv
     log_path = os.path.join(parent_folder_path, "logs", "projection")
     log_dir = setup_tensorboard_projector(vectors_file, metadata_file, log_path, 700000)
