@@ -18,6 +18,14 @@ VECTOR_SIZE = 100
 #      SUB FLOW 1                       #
 # #######################################
 
+def save_vectors_to_tsv(vectors, filename_prefix, filename_suffix, parent_folder_path):
+    logging.info("START TASK -  save "+filename_suffix+".tsv")
+    # Save reduced vectors as intermediate .tsv result
+    filename = filename_prefix + filename_suffix + ".tsv"
+    out_path = os.path.join(parent_folder_path, filename)
+    np.savetxt(out_path, vectors, delimiter='\t', fmt='%.20f')
+    logging.info("END TASK -  save "+filename_suffix+".tsv")
+
 #@task(log_prints=True)
 def compute_tsne(vectors, tsne_parameters):
     logging.info("START TASK - compute_tsne")
@@ -140,15 +148,12 @@ def eval_corpus(input_data_root_path, family_dataset_name, timestamp, filter_nam
     # Apply PCA to do a more efficient and first dimensionality reduction
     pca_reduced_vectors = compute_pca(biovector_list, pca_parameters)
 
-    logging.info("START TASK -  save vectors_pca.tsv")
-    # Save reduced PCA vectors as intermediate result
-    pca_filename = filename_prefix + "-vectors_pca.tsv"
-    pca_out_path = os.path.join(parent_folder_path, pca_filename)
-    np.savetxt(pca_out_path, pca_reduced_vectors, delimiter='\t', fmt='%.20f')
-    logging.info("END TASK -  save vectors_pca.tsv")
+    save_vectors_to_tsv(pca_reduced_vectors, filename_prefix, "-vectors_pca", parent_folder_path)
     
     # Apply TSNE to do final dimensionality reduction to 2D
     tsne_reduced_vectors = compute_tsne(pca_reduced_vectors, tsne_parameters)
+
+    save_vectors_to_tsv(tsne_reduced_vectors, filename_prefix, "-vectors_tsne", parent_folder_path)
 
     corpus_df[['reduced_vector_d1', 'reduced_vector_d2']] = tsne_reduced_vectors
 
