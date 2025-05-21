@@ -1,7 +1,7 @@
 import pytest
 import pandas as pd
 import corpus_prep_pipeline as corpus_prep
-from corpus_prep_utils import dataset_names, filters
+from utils.utils import dataset_names, filters
 from dotenv import dotenv_values
 
 config = dotenv_values("../.env")

@@ -1,0 +1,155 @@
+import os
+from dotenv import dotenv_values
+import logging
+import argparse
+# from prefect import flow, tags, task
+from gensim.models.fasttext import FastText
+from gensim.utils import tokenize
+import pandas as pd
+import numpy as np
+from utils.utils import dataset_names, filters, partition_rules, bioword_rules
+import utils.utils as corpus_prep_utils
+
+VECTOR_SIZE = 100
+
+def get_vector_for_bioword_partition(bioword_partition, model):
+    """Estimates an embedding vector for sequence based on its bioword representation"""
+    
+    # Create an empty vector the size of the trained FastText model
+    vector = np.zeros(VECTOR_SIZE, dtype=np.float64)
+
+    # Tokenize the bioword partition into a list of biowords
+    bioword_partition = list(tokenize(bioword_partition))
+    
+    # Retrieve the embedding for each word and accumulate in main vector
+    for i in range(0, len(bioword_partition)):
+        vector += model.wv[bioword_partition[i]]
+    
+    # Take the mean of all bioword vectors
+    vector = vector / len(bioword_partition)
+    return vector
+
+#@task(log_prints=True)
+def compute_sequence_vectors(corpus_df, model, bioword_rule_column="word_partition"):
+    logging.info("START TASK - compute_sequence_vectors")
+    corpus_df["bio_vector"] = corpus_df[bioword_rule_column].astype(str).apply(get_vector_for_bioword_partition, args=(model,))
+    logging.info("END TASK - compute_sequence_vectors")
+    return corpus_df
+
+#@task(log_prints=True)
+def load_corpus_eval_to_df(corpus_path: str):
+    logging.info("START TASK - load_corpus_eval_to_df")
+    df = pd.read_csv(corpus_path, encoding='utf-8')
+    logging.info("END TASK - load_corpus_eval_to_df")
+    return df
+
+#@task(log_prints=True)
+def get_corpus_eval_file_path_from_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+    logging.info("START TASK - get_corpus_eval_file_path_from_run")
+    corpus_file_iterator = corpus_prep_utils.get_corpus_file_iterator_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, False)
+    corpus_path = corpus_prep_utils.create_or_load_joined_corpus_file(corpus_file_iterator)
+    logging.info("END TASK - get_corpus_eval_file_path_from_run")
+    return corpus_path
+
+#@task(log_prints=True)
+def load_model(model_path: str):
+    logging.info("START TASK - load_model")
+    model = FastText.load(model_path, mmap='r')
+    logging.info("END TASK - load_model")
+    return model
+
+# #######################################
+#      MAIN FLOW                        #
+# #######################################
+
+#@flow(name="Create Protein Embeddings", log_prints=True)
+def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column):
+    logging.info("START FLOW ******************* Create Protein Embeddings *******************")
+
+    # Load FastText trained model
+    model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    model = load_model(model_path)
+
+    # Load evaluation corpus export (bioword partition with seq info and labels)
+    corpus_path = get_corpus_eval_file_path_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    corpus_df = load_corpus_eval_to_df(corpus_path)
+    
+    # Compute vector representation for sequence bioword representation
+    corpus_df = compute_sequence_vectors(corpus_df, model, bioword_rule_column)
+
+    # free up memory
+    del model
+    corpus_df.drop('word_partition', axis=1, inplace=True)
+
+    logging.info("START TASK -  save metadata.tsv")
+    # save metadata tsv
+    metadata_df = corpus_df[["sequence", "sequence_name", "sequence_family_name", "sequence_family_type"]]
+    metadata_filename = filename_prefix + "-metadata.tsv"
+    metadata_out_path = os.path.join(parent_folder_path, metadata_filename)
+    metadata_df.to_csv(metadata_out_path, sep='\t', index=False)
+    logging.info("END TASK -  save metadata.tsv")
+
+    logging.info("START TASK -  save vectors_bio.tsv")
+    # Create biovectors dataframe by unnesting the vector column
+    biovector_list = corpus_df["bio_vector"].tolist()
+    biovectors_df = pd.DataFrame(
+        biovector_list,
+        columns=[f'dim_{i}' for i in range(len(corpus_df["bio_vector"].iloc[0]))]
+    )
+
+    corpus_prep_utils.save_vectors_to_tsv(biovectors_df, filename_prefix, "-vectors_bio", parent_folder_path)
+    del biovectors_df
+    logging.info("END TASK -  save vectors_bio.tsv")
+    logging.info("END FLOW ******************* Create Protein Embeddings *******************")
+
+# #######################################
+#      MAIN                             #
+# #######################################
+
+if __name__=="__main__":
+    #travels up a level to find the .env
+    dotenv_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', '.env'))
+    config = dotenv_values(dotenv_path)
+
+    # Configure logging
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+    logging.basicConfig(
+        filename=os.path.join(logs_dir,'model_embeddings.log'),
+        level=logging.INFO,  # Adjust log level as needed
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        filemode='a'
+    )
+    
+    parser = argparse.ArgumentParser(description='Create protein biovectors from bioword embeddings')
+    parser.add_argument('timestamp',
+                        help='Run timestamp')
+    parser.add_argument('dataset_name', 
+                        help='Input protein dataset name')
+    parser.add_argument('filter',
+                        help='MR Filter')
+    parser.add_argument('partition_rule',
+                        help='MR partition rule')
+    # Parse arguments
+    args = parser.parse_args()
+
+    # input parameters
+    input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
+    # set run data to work on
+    family_dataset_name = getattr(dataset_names, args.family_dataset_name)
+    timestamp = args.timestamp
+    filter_name = getattr(filters, args.filter_name).name
+    partition_rule_name = getattr(partition_rules, args.partition_rule_name)["name"]
+    
+    # create output structure
+    date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
+    parent_folder_path = os.path.join(input_data_root_path, family_dataset_name, date, "vector_output")
+    os.makedirs(parent_folder_path, exist_ok=True)
+    filename_prefix = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name
+
+    # model embedding column
+    bioword_rule_column = bioword_rules.BIOWORD_RULE_PARTITION_COLUMN
+    
+    # with tags("eval"):
+    create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, 
+                filter_name, partition_rule_name, bioword_rule_column)

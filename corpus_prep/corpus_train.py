@@ -1,9 +1,10 @@
 import os
 from dotenv import dotenv_values
+import argparse
 from gensim.models.fasttext import FastText
 from prefect import flow, tags, task
-from corpus_prep_utils import dataset_names, filters, partition_rules
-import corpus_prep_utils
+from utils.utils import dataset_names, filters, partition_rules
+import utils.utils as corpus_prep_utils
 
 cpu_count = os.cpu_count()
 VECTOR_SIZE = 100
@@ -57,13 +58,14 @@ def train_model(corpus_file_path, model, epochs=5, total_examples_count=0, total
 #      MAIN FLOW                        #
 # #######################################
 
-@flow(name="Train BioWord Protein Corpus", log_prints=True)
-def train_corpus(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+@flow(name="Train BioWord Protein Corpus (Single)", log_prints=True)
+def train_corpus(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str, vector_size: int = VECTOR_SIZE, workers: int = cpu_count):
     # get file corpus iterable for desired run output 
     corpus_path = get_corpus_train_file_path_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
     
     # it seems paralell training works only with hs=1 and negative=0
-    model = FastText(vector_size=VECTOR_SIZE, workers=cpu_count, hs=1, negative=0)
+    # sg=1 uses skip-gram which has been shown to be better for subword info
+    model = FastText(vector_size=vector_size, workers=workers, hs=1, negative=0, sg=1)
 
     model = build_model_vocabulary(corpus_path, model)
     
@@ -76,7 +78,7 @@ def train_corpus(input_data_root_path: str, family_dataset_name: str, timestamp:
 
     print(f"Saved trained model {path}")
 
-@flow(name="Train BioWord Protein Corpus", log_prints=True)
+@flow(name="Train BioWord Protein Corpus (Iteratively)", log_prints=True)
 def train_corpus_iteratively(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
     
     # get file corpus iterable for desired run output 
@@ -99,12 +101,6 @@ def train_corpus_iteratively(input_data_root_path: str, family_dataset_name: str
     print(f"Finished training. Total examples seen: {model.corpus_count}, Total words seen: {model.corpus_total_words}")
     return model
 
-    #model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, dataset_names.TEST_GROUP, "20241029_15_41_02", 
-    #                                                 filters.MR_FILTER_NONE.name, partition_rules.PARTITION_RULE_USE_ALL["name"] )
-    #model = FastText.load(model_path)
-
-    #path = save_model(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, model)
-
 # #######################################
 #      MAIN                             #
 # #######################################
@@ -114,14 +110,26 @@ if __name__=="__main__":
     #travels up a level to find the .env
     dotenv_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), '..', '.env'))
     config = dotenv_values(dotenv_path)
+
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
+
+    parser = argparse.ArgumentParser(description='Perform BioWord Protein Corpus Training')
+    # Corpus input arguments
+    parser.add_argument('timestamp', help='Run timestamp')
+    parser.add_argument('dataset_name', help='Input protein dataset name')
+    parser.add_argument('filter', help='MR filter')
+    parser.add_argument('partition_rule', help='MR partition rule')
+    # Model training parameters
+    parser.add_argument('--vector-size', type=int, default=VECTOR_SIZE, help='Model vector size')
+    parser.add_argument('--max-cpu', type=int, default=cpu_count, help='Max number of CPUs to use in parallel training')
     
-    # set run data to work on
-    family_dataset_name = dataset_names.TEST_GROUP
-    #timestamp = "20241030_11_14_21"
-    timestamp = "20241029_15_41_02"
-    filter_name = filters.MR_FILTER_NONE.name
-    partition_rule_name = partition_rules.PARTITION_RULE_USE_ALL["name"]
-    
-    with tags("train"):
-        train_corpus(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    args = parser.parse_args()
+
+    timestamp = args.timestamp
+    family_dataset_name = getattr(dataset_names, args.dataset_name)
+    filter_name = getattr(filters, args.filter).name
+    partition_rule_name = getattr(partition_rules, args.partition_rule)["name"]
+
+    with tags(family_dataset_name, filter_name, partition_rule_name, timestamp):
+        train_corpus(input_data_root_path, family_dataset_name, timestamp, 
+                     filter_name, partition_rule_name, args.vector_size, args.max_cpu)

@@ -6,9 +6,10 @@ import os
 #import numpy as np
 #from itertools import chain
 from dotenv import dotenv_values
-from corpus_prep_utils import dataset_names, data_step_names, filters, partition_rules
-from database.database_helper import DatabaseHelper
-import corpus_prep_utils
+import argparse
+from utils.utils import dataset_names, data_step_names, filters, partition_rules
+from utils.database.database_helper import DatabaseHelper
+import utils.utils as corpus_prep_utils
 
 cpu_count = os.cpu_count()
 worker_count = cpu_count
@@ -340,7 +341,7 @@ def prepare_corpus(input_data_root_path: str, family_dataset_name: str, db_helpe
     # get db_helper init parameters to pass to parallel flow
     # and re instantiate db helper in each parallel task
     # to avoid serialization when passing full db_helper obj
-    db_helper_init_params = db_helper.get_init_params()
+    # db_helper_init_params = db_helper.get_init_params()
     
     # SUB FLOW 2: Compute BioWord Partition
     # apply word partitioning rule to the sequence dataset
@@ -363,13 +364,24 @@ if __name__=="__main__":
     config = dotenv_values(dotenv_path)
 
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
-    family_dataset_name = dataset_names.TEST_GROUP
-    filter = filters.MR_FILTER_NONE
-    partition_rule = partition_rules.PARTITION_RULE_USE_ALL
-    dry_run = True
+
+    # input parameters
+    input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
+    parser = argparse.ArgumentParser(description='Perform BioWord Protein Corpus Preparation')
+    parser.add_argument('dataset_name', help='Input protein dataset name')
+    parser.add_argument('filter', help='MR filter name')
+    parser.add_argument('partition_rule', help='MR partition rule')
+    parser.add_argument('--dry-run', action='store_true', help='Run the script in dry-run mode.')
+    
+    args = parser.parse_args()
+
+    family_dataset_name = getattr(dataset_names, args.dataset_name)
+    filter = getattr(filters, args.filter)
+    partition_rule = getattr(partition_rules, args.partition_rule)
+    dry_run = args.dry_run
 
     run_id = corpus_prep_utils.create_run_id(family_dataset_name, filter.name, partition_rule["name"])
     dataset_database_helper = DatabaseHelper(family_dataset_name, input_data_root_path, run_id, dry_run)
 
-    with tags(filter.name, partition_rule["name"]):
+    with tags(family_dataset_name, filter.name, partition_rule["name"]):
         prepare_corpus(input_data_root_path, family_dataset_name, dataset_database_helper, filter, partition_rule)

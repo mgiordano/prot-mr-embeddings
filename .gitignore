@@ -6,3 +6,4 @@ venv
 gcloud_saccount_key.json
 *.log
 *.out
+logs/
