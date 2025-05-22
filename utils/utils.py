@@ -19,6 +19,12 @@ class MRFilter:
     condition: str = field(metadata={"description": "The condition operator by which to filter"}, default="")
     value: str = field(metadata={"description": "The value by which to filter the condition"}, default="")
 
+    def get_filter_for_query(self):
+        # escape string values with ''
+        value = f"'{self.value}'" if (isinstance(self.value, str) and self.condition != 'BETWEEN') else self.value
+        filter_string = f"{self.by} {self.condition} {value}"
+        return filter_string
+
 """def in_prefect_flow_context():
     try:
         from prefect import context
@@ -173,6 +179,14 @@ class data_step_names():
     S3_CORPUS = "s3_corpus"
 
 class filters():
+    def create_filter_keep_len_plus(length: int):
+        return MRFilter(condition= ">=", by="LENGTH(pattern)", value=length, name=f"filter_keep_length_{str(length)}plus")
+    
+    def create_filter_keep_len_between(min_length: int, max_length: int):
+        return MRFilter(condition= "BETWEEN", by="LENGTH(pattern)", 
+                        value=f"{min_length} AND {max_length}", 
+                        name=f"filter_keep_length_{str(min_length)}to{str(max_length)}")
+
     MR_FILTER_NONE = MRFilter(by="1", condition="=", value="1", name="filter_none")
 
     MR_FILTER_KEEP_SIGNIFICANT = MRFilter(condition="include", by="significance", name="filter_keep_significant")
@@ -185,8 +199,8 @@ class filters():
 
     MR_FILTER_DROP_ALL = MRFilter(condition= "=", by="type", value="NONE", name="filter_drop_all")
 
-    def create_filter_keep_len_plus(length: int):
-        return MRFilter(condition= ">=", by="LENGTH(pattern)", value=length, name=f"filter_keep_length_{str(length)}plus")
+    MR_FILTER_KEEP_4_10 = create_filter_keep_len_between(4, 10)
+
 
 class partition_rules():
     PARTITION_RULE_USE_ALL = {

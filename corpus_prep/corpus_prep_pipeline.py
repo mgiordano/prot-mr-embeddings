@@ -289,10 +289,7 @@ def filter_mrs_with_statistical_significance(sequence_dataset_df, mrs_dataset_df
 
 @task(log_prints=True)
 def filter_mrs_with_query(db_helper, filter):
-    # escape string values with ''
-    value = f"'{filter.value}'" if isinstance(filter.value, str) else filter.value
-    filter = f"{filter.by} {filter.condition} {value}"
-    return db_helper.select_patterns(filter)
+    return db_helper.select_patterns(filter.get_filter_for_query())
 
 @flow(name="Filter Maximal Repeats", log_prints=True)
 def filter_maximal_repeats(db_helper, filter):
