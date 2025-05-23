@@ -186,14 +186,39 @@ def create_or_load_joined_corpus_file(run_files_iterator):
     joined_file_path = os.path.join(run_files_iterator.path, joined_file_name)
     return join_csv_shards(joined_file_path, run_files_iterator, skip_joined_files=True)
 
-def save_vectors_to_tsv(vectors, filename_prefix, filename_suffix, parent_folder_path):
-    # Save reduced vectors as intermediate .tsv result
+def save_vectors_to_tsv(vectors, filename_prefix, filename_suffix, parent_folder_path, chunk_size=None):
+    """Save vectors to TSV file, with optional chunked processing for large datasets"""
     filename = filename_prefix + filename_suffix + ".tsv"
     out_path = os.path.join(parent_folder_path, filename)
-    if(isinstance(vectors, pd.DataFrame)):
-        vectors.to_csv(out_path, sep='\t', header=False, index=False, float_format='%.20f')
+    
+    if isinstance(vectors, pd.DataFrame):
+        # Use chunked processing if chunk_size is specified and dataset is large
+        if chunk_size is not None and len(vectors) > chunk_size:
+            import logging
+            total_rows = len(vectors)
+            logging.info(f"Saving {total_rows} vectors to {out_path} in chunks of {chunk_size}")
+            
+            # Save in chunks to avoid memory issues
+            for i in range(0, total_rows, chunk_size):
+                chunk_end = min(i + chunk_size, total_rows)
+                chunk = vectors.iloc[i:chunk_end]
+                
+                # Write mode: 'w' for first chunk, 'a' for subsequent chunks
+                mode = 'w' if i == 0 else 'a'
+                
+                chunk.to_csv(out_path, sep='\t', header=False, index=False, 
+                            float_format='%.20f', mode=mode)
+                
+                # Log progress for large datasets
+                if chunk_end % 100000 == 0 or chunk_end == total_rows:
+                    logging.info(f"Saved {chunk_end}/{total_rows} vector rows ({(chunk_end/total_rows)*100:.1f}%)")
+        else:
+            # Original behavior for smaller datasets
+            vectors.to_csv(out_path, sep='\t', header=False, index=False, float_format='%.20f')
     else:
+        # Original numpy array handling
         np.savetxt(out_path, vectors, delimiter='\t', fmt='%.20f')
+    
     return out_path
 
 def get_control_sequences_file_path(input_data_root_path: str, family_dataset_name: str, timestamp: str):

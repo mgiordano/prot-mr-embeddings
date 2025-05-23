@@ -13,27 +13,54 @@ import utils.utils as corpus_prep_utils
 VECTOR_SIZE = 100
 
 def get_vector_for_bioword_partition(bioword_partition, model):
-    """Estimates an embedding vector for sequence based on its bioword representation"""
+    """Optimized embedding vector estimation for sequence based on its bioword representation"""
     
-    # Create an empty vector the size of the trained FastText model
-    vector = np.zeros(VECTOR_SIZE, dtype=np.float64)
-
+    # Handle empty or NaN inputs
+    if not bioword_partition or pd.isna(bioword_partition):
+        return np.zeros(VECTOR_SIZE, dtype=np.float32)
+    
     # Tokenize the bioword partition into a list of biowords
-    bioword_partition = list(tokenize(bioword_partition))
+    tokens = list(tokenize(bioword_partition))
+    if not tokens:
+        return np.zeros(VECTOR_SIZE, dtype=np.float32)
     
-    # Retrieve the embedding for each word and accumulate in main vector
-    for i in range(0, len(bioword_partition)):
-        vector += model.wv[bioword_partition[i]]
+    # Collect vectors for valid tokens only
+    valid_vectors = []
+    for token in tokens:
+        if token in model.wv:
+            valid_vectors.append(model.wv[token])
     
-    # Take the mean of all bioword vectors
-    vector = vector / len(bioword_partition)
-    return vector
+    # Return zero vector if no valid tokens found
+    if not valid_vectors:
+        return np.zeros(VECTOR_SIZE, dtype=np.float32)
+    
+    # Vectorized mean calculation using numpy
+    vectors_array = np.array(valid_vectors, dtype=np.float32)
+    return np.mean(vectors_array, axis=0)
 
 #@task(log_prints=True)
-def compute_sequence_vectors(corpus_df, model, bioword_rule_column="word_partition"):
-    logging.info("START TASK - compute_sequence_vectors")
-    corpus_df["bio_vector"] = corpus_df[bioword_rule_column].astype(str).apply(get_vector_for_bioword_partition, args=(model,))
-    logging.info("END TASK - compute_sequence_vectors")
+def compute_sequence_vectors(corpus_df, model, bioword_rule_column="word_partition", chunk_size=10000):
+    """Optimized sequence vector computation with chunked processing and progress logging"""
+    logging.info("START TASK - compute_sequence_vectors (chunked)")
+    
+    bio_vectors = []
+    total_rows = len(corpus_df)
+    
+    # Process in chunks to reduce memory pressure and provide progress updates
+    for i in range(0, total_rows, chunk_size):
+        chunk_end = min(i + chunk_size, total_rows)
+        chunk = corpus_df[bioword_rule_column].iloc[i:chunk_end]
+        
+        # Process chunk with optimized function
+        chunk_vectors = chunk.astype(str).apply(get_vector_for_bioword_partition, args=(model,))
+        bio_vectors.extend(chunk_vectors.tolist())
+        
+        # Log progress every 50k sequences
+        if chunk_end % 50000 == 0 or chunk_end == total_rows:
+            logging.info(f"Processed {chunk_end}/{total_rows} sequences ({(chunk_end/total_rows)*100:.1f}%)")
+    
+    corpus_df["bio_vector"] = bio_vectors
+    logging.info("END TASK - compute_sequence_vectors (chunked)")
     return corpus_df
 
 #@task(log_prints=True)
@@ -59,18 +86,25 @@ def get_corpus_eval_file_path_from_run(input_data_root_path: str, family_dataset
     return corpus_path
 
 #@task(log_prints=True)
-def load_model(model_path: str):
+def load_model(model_path: str, use_mmap: bool = False):
     logging.info("START TASK - load_model")
-    model = FastText.load(model_path, mmap='r')
+    if use_mmap:
+        logging.info("Loading model with memory mapping (mmap='r') - slower but uses less RAM")
+        model = FastText.load(model_path, mmap='r')
+    else:
+        logging.info("Loading model into RAM - faster but uses more memory")
+        model = FastText.load(model_path)
     logging.info("END TASK - load_model")
     return model
+
+
 
 # #######################################
 #      MAIN FLOW                        #
 # #######################################
 
 #@flow(name="Create Protein Embeddings", log_prints=True)
-def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column, is_control=False):
+def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column, is_control=False, use_mmap=False):
     logging.info("START FLOW ******************* Create Protein Embeddings *******************")
 
     # create output structure
@@ -84,18 +118,34 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
 
     # Load FastText trained model
     model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
-    model = load_model(model_path)
+    model = load_model(model_path, use_mmap)
 
     # Load evaluation corpus export (bioword partition with seq info and labels)
     corpus_path = get_corpus_eval_file_path_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, is_control)
     corpus_df = load_corpus_eval_to_df(corpus_path)
+    
+    # Optimize data types for memory efficiency
+    logging.info("Optimizing data types for memory efficiency")
+    if 'sequence_name' in corpus_df.columns:
+        corpus_df['sequence_name'] = corpus_df['sequence_name'].astype('category')
+    if 'sequence_family_name' in corpus_df.columns:
+        corpus_df['sequence_family_name'] = corpus_df['sequence_family_name'].astype('category')
+    if 'sequence_family_type' in corpus_df.columns:
+        corpus_df['sequence_family_type'] = corpus_df['sequence_family_type'].astype('category')
+    
+    logging.info(f"Loaded corpus with {len(corpus_df)} sequences")
     
     # Compute vector representation for sequence bioword representation
     corpus_df = compute_sequence_vectors(corpus_df, model, bioword_rule_column)
 
     # free up memory
     del model
-    corpus_df.drop('word_partition', axis=1, inplace=True)
+    logging.info("Model freed from memory")
+    
+    # Drop word_partition column to save memory before vector processing
+    if 'word_partition' in corpus_df.columns:
+        corpus_df.drop('word_partition', axis=1, inplace=True)
+        logging.info("Dropped word_partition column to save memory")
 
     logging.info("START TASK -  save metadata.tsv")
     # save metadata tsv
@@ -112,14 +162,19 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
 
     logging.info("START TASK -  save vectors_bio.tsv")
     # Create biovectors dataframe by unnesting the vector column
+    logging.info("Converting bio_vector column to DataFrame format")
     biovector_list = corpus_df["bio_vector"].tolist()
+    
+    # More memory-efficient DataFrame creation
+    logging.info(f"Creating vectors DataFrame with {len(biovector_list)} rows and {VECTOR_SIZE} columns")
     biovectors_df = pd.DataFrame(
         biovector_list,
-        columns=[f'dim_{i}' for i in range(len(corpus_df["bio_vector"].iloc[0]))]
+        columns=[f'dim_{i}' for i in range(VECTOR_SIZE)],
+        dtype=np.float32  # Use float32 for memory efficiency
     )
 
-    corpus_prep_utils.save_vectors_to_tsv(biovectors_df, filename_prefix, "-vectors_bio", parent_folder_path)
-    del biovectors_df
+    corpus_prep_utils.save_vectors_to_tsv(biovectors_df, filename_prefix, "-vectors_bio", parent_folder_path, chunk_size=50000)
+    del biovectors_df, biovector_list  # Explicit cleanup
     logging.info("END TASK -  save vectors_bio.tsv")
     logging.info("END FLOW ******************* Create Protein Embeddings *******************")
 
@@ -154,6 +209,9 @@ if __name__=="__main__":
     parser.add_argument('--control', 
                         action='store_true',
                         help='Process control dataset instead of family dataset')
+    parser.add_argument('--mmap', 
+                        action='store_true',
+                        help='Use memory mapping for loading the model')
     # Parse arguments
     args = parser.parse_args()
 
@@ -170,4 +228,4 @@ if __name__=="__main__":
     
     # with tags("eval"):
     create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, 
-                filter_name, partition_rule_name, bioword_rule_column, args.control)
+                filter_name, partition_rule_name, bioword_rule_column, args.control, args.mmap)
