@@ -135,24 +135,56 @@ def get_corpus_file_iterator_from_run(input_data_root_path: str, family_dataset_
     StorageHelper().download_files_matching_prefix("processed_proteins", file_name_prefix, family_dataset_name+"/corpus/"+corpus_type, parent_path)
     return RunFilesCorpus(parent_path, file_name_prefix)
 
+def join_csv_shards(output_file_path: str, shard_files, header_line: str = None, skip_joined_files: bool = True):
+    """
+    Generic function to join CSV shard files into a single file.
+    
+    Args:
+        output_file_path: Path where the joined file should be created
+        shard_files: Iterable of file paths to join (can be file paths or file iterator)
+        header_line: Optional header line to write first (if None, uses header from first file)
+        skip_joined_files: Whether to skip files that already contain "joined" in the name
+    
+    Returns:
+        Path to the joined file
+    """
+    if not os.path.exists(output_file_path):
+        print(f"Creating joined file {output_file_path}...")
+        with open(output_file_path, "w", encoding='utf-8') as outfile:
+            # Write custom header if provided
+            if header_line:
+                outfile.write(header_line)
+                if not header_line.endswith('\n'):
+                    outfile.write('\n')
+            
+            i = 0
+            for file_path in shard_files:
+                # Skip already joined files if requested
+                if skip_joined_files and "joined" in os.path.basename(file_path):
+                    continue
+                
+                if os.path.isfile(file_path):
+                    with open(file_path, 'r', encoding='utf-8') as infile:
+                        print(f"Joining shard file {file_path}")
+                        
+                        # Skip header for all files except the first (unless custom header provided)
+                        if i > 0 or header_line:
+                            try:
+                                next(infile)  # Skip header row
+                            except StopIteration:
+                                continue  # Empty file
+                        
+                        # Copy all lines from this shard
+                        for line in infile:
+                            outfile.write(line)
+                        i += 1
+    
+    return output_file_path
+
 def create_or_load_joined_corpus_file(run_files_iterator):
     joined_file_name = run_files_iterator.prefix_filter + "joined.csv"
     joined_file_path = os.path.join(run_files_iterator.path, joined_file_name)
-    if not os.path.exists(joined_file_path):
-        # Open the output file in write mode
-        with open(joined_file_path, "w", encoding='utf-8') as outfile:
-            i = 0
-            # Iterate over the files, skipping the header in all but the first file
-            for file in run_files_iterator:
-                if not file.endswith("joined.csv"):
-                    with open(file, 'r', encoding='utf-8') as infile:
-                        print(f"Joining file {file}")
-                        if i > 0:  # Skip header row for all but the first file
-                            next(infile)
-                        for line in infile:
-                            outfile.write(line)
-                        i+=1
-    return joined_file_path
+    return join_csv_shards(joined_file_path, run_files_iterator, skip_joined_files=True)
 
 def save_vectors_to_tsv(vectors, filename_prefix, filename_suffix, parent_folder_path):
     # Save reduced vectors as intermediate .tsv result
@@ -163,6 +195,78 @@ def save_vectors_to_tsv(vectors, filename_prefix, filename_suffix, parent_folder
     else:
         np.savetxt(out_path, vectors, delimiter='\t', fmt='%.20f')
     return out_path
+
+def get_control_sequences_file_path(input_data_root_path: str, family_dataset_name: str, timestamp: str):
+    """Get the file path for control sequences dataset."""
+    control_dataset_name = f"control_{family_dataset_name}"
+    file_name = f"{control_dataset_name}_sequence_dataset.csv"
+    return os.path.join(input_data_root_path, family_dataset_name, file_name)
+
+def get_filtered_patterns_file_path_from_run(input_data_root_path: str, family_dataset_name: str, timestamp: str, filter_name: str, partition_rule_name: str):
+    """Get or create the joined filtered patterns file from a run."""
+    from utils.database.database_helper import DatabaseHelper
+    
+    # Initialize database helper
+    db_helper = DatabaseHelper(family_dataset_name, input_data_root_path, "", dry_run=False)
+    
+    # Construct the filtered MRs table name
+    filtered_mrs_table_name = get_stage_run_table_name(family_dataset_name, timestamp, data_step_names.S1_FILTERED_MR, filter_name, partition_rule_name)
+    
+    # Check if table exists
+    if not db_helper.check_table_existence(db_helper.BQ_STAGE_DATASET_NAME, filtered_mrs_table_name):
+        raise ValueError(f"Filtered MRs table {filtered_mrs_table_name} not found. Please run the corpus preparation pipeline first.")
+    
+    # Export to GCS and download
+    date = get_date_from_formatted_ts(timestamp)
+    gcs_root_path = os.path.join(family_dataset_name, date, "filtered_patterns")
+    export_suffix = "_filtered_patterns_*"
+    
+    print(f"Exporting filtered patterns table {filtered_mrs_table_name} to GCS...")
+    db_helper.export_table_to_gcs_as_csv(filtered_mrs_table_name, gcs_root_path, 
+                                         export_columns=["pattern"], 
+                                         file_name_suffix=export_suffix)
+    
+    # Download the exported files
+    local_download_path = os.path.join(input_data_root_path, family_dataset_name, date)
+    file_name_prefix = filtered_mrs_table_name + "_filtered_patterns_"
+    
+    print(f"Downloading filtered patterns files to {local_download_path}...")
+    db_helper.storage_helper.download_files_matching_prefix(
+        db_helper.storage_helper.bucket_name, 
+        file_name_prefix, 
+        gcs_root_path, 
+        local_download_path
+    )
+    
+    # Create joined CSV file from downloaded shards
+    joined_file_name = f"{filtered_mrs_table_name}_filtered_patterns_joined.csv"
+    joined_file_path = os.path.join(local_download_path, joined_file_name)
+    
+    # Get list of shard files to join
+    shard_files = []
+    for filename in os.listdir(local_download_path):
+        if filename.startswith(file_name_prefix) and filename.endswith(".csv"):
+            shard_files.append(os.path.join(local_download_path, filename))
+    
+    # Use the generic join function with custom header
+    return join_csv_shards(joined_file_path, shard_files, header_line="pattern", skip_joined_files=True)
+
+def save_control_results(input_data_root_path: str, family_dataset_name: str, timestamp: str, 
+                        filter_name: str, partition_rule_name: str, results_df):
+    """Save control results following the same naming convention as other pipeline outputs."""
+    # Create run ID and file path following the same convention
+    run_id = f"{timestamp}-{family_dataset_name}-{filter_name}-{partition_rule_name}"
+    output_file_name = f"{run_id}-{data_step_names.S3_CORPUS}_control_for_eval.csv"
+    
+    date = get_date_from_formatted_ts(timestamp)
+    output_dir = os.path.join(input_data_root_path, family_dataset_name, date)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    output_path = os.path.join(output_dir, output_file_name)
+    results_df.to_csv(output_path, index=False)
+    
+    print(f"Control results saved to {output_path}")
+    return output_path
 
 # #######################################
 #      CONSTANTS                        #
