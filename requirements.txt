@@ -19,3 +19,4 @@ datashader
 colorcet
 holoviews
 pyahocorasick
+opentsne
