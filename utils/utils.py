@@ -10,6 +10,7 @@ import pandas as pd
 from gensim.utils import tokenize
 from gensim import utils
 from utils.database.storage_helper import StorageHelper
+import re
 
 @dataclass
 class MRFilter:
@@ -56,20 +57,54 @@ def task(**task_kwargs):
 #      I/O                              #
 # #######################################
 
+def extract_shard_number(filename):
+    """
+    Extract the numeric shard number from a filename.
+    Handles various shard naming patterns like:
+    - filename_000000000000.csv
+    - filename_0.csv  
+    - filename_1.csv
+    - filename_filtered_patterns_000000000001.csv
+    
+    Returns the numeric value for sorting, or 0 if no number found.
+    """
+    # Look for patterns like _000000000000.csv, _0.csv, _1.csv at the end
+    match = re.search(r'_(\d+)\.csv$', filename)
+    if match:
+        return int(match.group(1))
+    
+    # If no pattern found, return 0 (will be sorted first)
+    return 0
+
+def sort_shard_files(file_paths):
+    """
+    Sort shard files by their numeric suffix in ascending order.
+    
+    Args:
+        file_paths: List of file paths to sort
+        
+    Returns:
+        List of file paths sorted by shard number
+    """
+    return sorted(file_paths, key=lambda path: extract_shard_number(os.path.basename(path)))
+
 class RunFilesCorpus:
     def __init__(self, corpus_folder_path, run_file_prefix):
         self.path = corpus_folder_path
         self.prefix_filter = run_file_prefix
 
     def __iter__(self):
+        # Collect all matching files first
+        matching_files = []
         for filename in os.listdir(self.path):
             file_path = os.path.join(self.path, filename)
             if filename.startswith(self.prefix_filter) and filename.endswith(".csv"):
                 if os.path.isfile(file_path):  # Make sure it's a file
-                    yield file_path
-                    #with utils.open(file_path, 'r', encoding='utf-8') as fin:
-                        #for line in fin:
-                            #yield list(tokenize(line))
+                    matching_files.append(file_path)
+        
+        # Sort files by shard number before yielding
+        for file_path in sort_shard_files(matching_files):
+            yield file_path
 
 def print_df(dataframe, limit=10):
     print(dataframe.head(limit).to_markdown(index=False, numalign="left", stralign="left"), end="\n")
@@ -150,6 +185,19 @@ def join_csv_shards(output_file_path: str, shard_files, header_line: str = None,
     """
     if not os.path.exists(output_file_path):
         print(f"Creating joined file {output_file_path}...")
+        
+        # Convert iterator to list and filter/sort files
+        file_list = []
+        for file_path in shard_files:
+            # Skip already joined files if requested
+            if skip_joined_files and "joined" in os.path.basename(file_path):
+                continue
+            if os.path.isfile(file_path):
+                file_list.append(file_path)
+        
+        # Sort files by shard number to ensure consistent ordering
+        sorted_files = sort_shard_files(file_list)
+        
         with open(output_file_path, "w", encoding='utf-8') as outfile:
             # Write custom header if provided
             if header_line:
@@ -157,27 +205,20 @@ def join_csv_shards(output_file_path: str, shard_files, header_line: str = None,
                 if not header_line.endswith('\n'):
                     outfile.write('\n')
             
-            i = 0
-            for file_path in shard_files:
-                # Skip already joined files if requested
-                if skip_joined_files and "joined" in os.path.basename(file_path):
-                    continue
-                
-                if os.path.isfile(file_path):
-                    with open(file_path, 'r', encoding='utf-8') as infile:
-                        print(f"Joining shard file {file_path}")
-                        
-                        # Skip header for all files except the first (unless custom header provided)
-                        if i > 0 or header_line:
-                            try:
-                                next(infile)  # Skip header row
-                            except StopIteration:
-                                continue  # Empty file
-                        
-                        # Copy all lines from this shard
-                        for line in infile:
-                            outfile.write(line)
-                        i += 1
+            for i, file_path in enumerate(sorted_files):
+                with open(file_path, 'r', encoding='utf-8') as infile:
+                    print(f"Joining shard file {file_path} (shard #{extract_shard_number(os.path.basename(file_path))})")
+                    
+                    # Skip header for all files except the first (unless custom header provided)
+                    if i > 0 or header_line:
+                        try:
+                            next(infile)  # Skip header row
+                        except StopIteration:
+                            continue  # Empty file
+                    
+                    # Copy all lines from this shard
+                    for line in infile:
+                        outfile.write(line)
     
     return output_file_path
 

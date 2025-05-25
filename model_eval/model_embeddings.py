@@ -97,15 +97,32 @@ def load_model(model_path: str, use_mmap: bool = False):
     logging.info("END TASK - load_model")
     return model
 
-
+#@task(log_prints=True)
+def create_and_save_metadata(corpus_df, filename_prefix, parent_folder_path, is_control=False):
+    """Extract metadata creation and saving logic into a reusable function"""
+    logging.info("START TASK -  save metadata.tsv")
+    # save metadata tsv
+    metadata_df = corpus_df[["sequence", "sequence_name", "sequence_family_name", "sequence_family_type"]].copy()
+    
+    # For control datasets, set sequence_family_type to "control"
+    if is_control:
+        metadata_df["sequence_family_type"] = "control"
+    
+    metadata_filename = filename_prefix + "-metadata.tsv"
+    metadata_out_path = os.path.join(parent_folder_path, metadata_filename)
+    metadata_df.to_csv(metadata_out_path, sep='\t', index=False)
+    logging.info("END TASK -  save metadata.tsv")
 
 # #######################################
 #      MAIN FLOW                        #
 # #######################################
 
 #@flow(name="Create Protein Embeddings", log_prints=True)
-def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column, is_control=False, use_mmap=False):
-    logging.info("START FLOW ******************* Create Protein Embeddings *******************")
+def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column, is_control=False, use_mmap=False, metadata_only=False):
+    if metadata_only:
+        logging.info("START FLOW ******************* Create Metadata Only *******************")
+    else:
+        logging.info("START FLOW ******************* Create Protein Embeddings *******************")
 
     # create output structure
     date = corpus_prep_utils.get_date_from_formatted_ts(timestamp)
@@ -115,10 +132,6 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
     # Determine filename prefix based on whether this is control data
     filename_prefix_base = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name
     filename_prefix = filename_prefix_base + "-control" if is_control else filename_prefix_base
-
-    # Load FastText trained model
-    model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
-    model = load_model(model_path, use_mmap)
 
     # Load evaluation corpus export (bioword partition with seq info and labels)
     corpus_path = get_corpus_eval_file_path_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, is_control)
@@ -135,6 +148,18 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
     
     logging.info(f"Loaded corpus with {len(corpus_df)} sequences")
     
+    # Create and save metadata (always needed)
+    create_and_save_metadata(corpus_df, filename_prefix, parent_folder_path, is_control)
+    
+    # If metadata_only flag is set, skip vector processing
+    if metadata_only:
+        logging.info("END FLOW ******************* Create Metadata Only *******************")
+        return
+
+    # Load FastText trained model (only needed for vector processing)
+    model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    model = load_model(model_path, use_mmap)
+    
     # Compute vector representation for sequence bioword representation
     corpus_df = compute_sequence_vectors(corpus_df, model, bioword_rule_column)
 
@@ -146,19 +171,6 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
     if 'word_partition' in corpus_df.columns:
         corpus_df.drop('word_partition', axis=1, inplace=True)
         logging.info("Dropped word_partition column to save memory")
-
-    logging.info("START TASK -  save metadata.tsv")
-    # save metadata tsv
-    metadata_df = corpus_df[["sequence", "sequence_name", "sequence_family_name", "sequence_family_type"]].copy()
-    
-    # For control datasets, set sequence_family_type to "control"
-    if is_control:
-        metadata_df["sequence_family_type"] = "control"
-    
-    metadata_filename = filename_prefix + "-metadata.tsv"
-    metadata_out_path = os.path.join(parent_folder_path, metadata_filename)
-    metadata_df.to_csv(metadata_out_path, sep='\t', index=False)
-    logging.info("END TASK -  save metadata.tsv")
 
     logging.info("START TASK -  save vectors_bio.tsv")
     # Create biovectors dataframe by unnesting the vector column
@@ -212,6 +224,9 @@ if __name__=="__main__":
     parser.add_argument('--mmap', 
                         action='store_true',
                         help='Use memory mapping for loading the model')
+    parser.add_argument('--metadata', 
+                        action='store_true',
+                        help='Create metadata only')
     # Parse arguments
     args = parser.parse_args()
 
@@ -228,4 +243,4 @@ if __name__=="__main__":
     
     # with tags("eval"):
     create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, 
-                filter_name, partition_rule_name, bioword_rule_column, args.control, args.mmap)
+                filter_name, partition_rule_name, bioword_rule_column, args.control, args.mmap, args.metadata)
