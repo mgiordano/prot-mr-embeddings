@@ -2,8 +2,7 @@ import numpy as np
 from dotenv import dotenv_values
 import os
 import sys
-#from sklearn.manifold import TSNE
-from openTSNE.sklearn import TSNE
+# TSNE imports are now handled dynamically in reduce_with_tsne function
 from sklearn.decomposition import PCA
 # from prefect import flow, tags, task
 import logging
@@ -18,6 +17,63 @@ def get_param_value(param_array, index):
         return param_array[index]
     return param_array[-1]  # Use last element if index out of bounds   
 
+def map_tsne_parameters(tsne_parameters, implementation, iteration_index):
+    """Map parameters between different TSNE implementations"""
+    
+    # Get base parameters
+    n_components = get_param_value(tsne_parameters["n_components"], iteration_index)
+    random_state = get_param_value(tsne_parameters["random_state"], iteration_index)
+    perplexity = get_param_value(tsne_parameters["perplexity"], iteration_index)
+    learning_rate = get_param_value(tsne_parameters["learning_rate"], iteration_index)
+    max_iter = get_param_value(tsne_parameters["max_iter"], iteration_index)
+    
+    # Handle optional n_jobs parameter - default to max CPU count if not specified
+    if "n_jobs" in tsne_parameters and tsne_parameters["n_jobs"] is not None:
+        n_jobs = get_param_value(tsne_parameters["n_jobs"], iteration_index)
+    else:
+        n_jobs = os.cpu_count()  # Use all available CPUs
+        logging.info(f"n_jobs not specified in parameters, defaulting to max CPU count: {n_jobs}")
+    
+    method = get_param_value(tsne_parameters["method"], iteration_index)
+    
+    params = {
+        "n_components": n_components,
+        "random_state": random_state,
+        "perplexity": perplexity,
+        "learning_rate": learning_rate,
+        "n_jobs": n_jobs 
+    }
+    if implementation == "openTSNE":
+        # openTSNE parameter mapping
+        params["negative_gradient_method"] = "auto"
+        method_name = params["negative_gradient_method"]
+        params["n_iter"] = max_iter
+    elif implementation == "sklearn":
+        # sklearn.manifold.TSNE parameter mapping
+        params["max_iter"] = max_iter
+        params["method"] = "barnes_hut" if method == "barnes_hut" else "exact"
+        method_name = params["method"]
+    else:
+        raise ValueError(f"Unsupported TSNE implementation: {implementation}")
+    
+    return params, method_name
+
+def create_standardized_filename_suffix(params, method_name, implementation):
+    """Create standardized filename suffix for both implementations"""
+    max_iter_value = params.get('max_iter', params.get('n_iter'))
+    return f"-vectors_tsne-{implementation}-{method_name}-{params['perplexity']}-{params['learning_rate']}-{max_iter_value}-{params['random_state']}"
+
+def log_tsne_iteration_start(params, method_name, implementation):
+    """Standardized logging for TSNE iteration start"""
+    max_iter_key = 'max_iter' if 'max_iter' in params else 'n_iter'
+    logging.info(f"START TASK - TSNE iteration ({implementation}) - "
+                f"perplexity: {params['perplexity']} - "
+                f"learning_rate: {params['learning_rate']} - "
+                f"method: {method_name} - "
+                f"max_iter: {params[max_iter_key]} - "
+                f"random_state: {params['random_state']} - "
+                f"n_jobs: {params['n_jobs']}")
+
 #@task(log_prints=True)
 def compute_pca(vector_list, pca_parameters):
     logging.info("START TASK - compute_pca")
@@ -29,8 +85,18 @@ def compute_pca(vector_list, pca_parameters):
     return reduced_vectors
 
 #@task(log_prints=True)
-def reduce_with_tsne(vectors, run_id, tsne_parameters):
-    logging.info("START TASK - reduce_with_tsne")
+def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"):
+    logging.info(f"START TASK - reduce_with_tsne using {implementation}")
+
+    # Import the appropriate TSNE implementation
+    if implementation == "openTSNE":
+        from openTSNE.sklearn import TSNE
+        logging.info("Using openTSNE implementation")
+    elif implementation == "sklearn":
+        from sklearn.manifold import TSNE
+        logging.info("Using sklearn.manifold TSNE implementation")
+    else:
+        raise ValueError(f"Unsupported TSNE implementation: {implementation}")
 
     experiment_out_path = tsne_parameters["experiment_out_path"]
     os.makedirs(experiment_out_path, exist_ok=True)
@@ -44,43 +110,33 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters):
     # Apply TSNE to do final dimensionality reduction to 2D
     max_iterations = max(len(tsne_parameters[key]) if isinstance(tsne_parameters[key], list) else 0 for key in tsne_parameters.keys())
     for i in range(max_iterations):
-        params = {
-            "n_components" : get_param_value(tsne_parameters["n_components"], i), 
-            "random_state" : get_param_value(tsne_parameters["random_state"], i),
-            # method for sklearn TSNE
-            "negative_gradient_method" : "bh" if get_param_value(tsne_parameters["method"], i) == "barnes_hut" else "auto", 
-            "perplexity" : get_param_value(tsne_parameters["perplexity"], i), 
-            "learning_rate" : get_param_value(tsne_parameters["learning_rate"], i),
-            # max-iter for sklearn TSNE
-            "n_iter" : get_param_value(tsne_parameters["max_iter"], i), 
-            "n_jobs" : get_param_value(tsne_parameters["n_jobs"], i)
-        }
+        # Map parameters for the specific implementation
+        params, method_name = map_tsne_parameters(tsne_parameters, implementation, i)
         
+        # Create TSNE instance
         tsne = TSNE(**params)
-        logging.info("START TASK -  TSNE iteration \
-                    - perplexity: " + str(params["perplexity"]) 
-                    + " - lrate: " + str(params["learning_rate"]) 
-                    + " - method: " + str(params["negative_gradient_method"]) 
-                    + " - maxiter: " + str(params["n_iter"]) 
-                    + " - random_state: " + str(params["random_state"]))
+        
+        # Log iteration start with standardized format
+        log_tsne_iteration_start(params, method_name, implementation)
         
         # Apply t-SNE to reduce dimensionality
         reduced_vectors = tsne.fit_transform(pca_reduced_vectors)
         
-        out_file_suffix = f"-vectors_tsne-{params['negative_gradient_method']}-{params['perplexity']}-{params['learning_rate']}-{params['n_iter']}-{params['random_state']}"
+        # Create standardized filename suffix
+        out_file_suffix = create_standardized_filename_suffix(params, method_name, implementation)
         
-        logging.info("START TASK -  save "+out_file_suffix+".tsv")
+        logging.info(f"START TASK - save {out_file_suffix}.tsv")
         
         utils.save_vectors_to_tsv(reduced_vectors, run_id, out_file_suffix, experiment_out_path)
         
-        logging.info("END TASK -  save "+out_file_suffix+".tsv")
-        logging.info("END TASK -  TSNE iteration")
+        logging.info(f"END TASK - save {out_file_suffix}.tsv")
+        logging.info("END TASK - TSNE iteration")
     
-    logging.info("END TASK - reduce_with_tsne")
+    logging.info(f"END TASK - reduce_with_tsne using {implementation}")
     return reduced_vectors
 
 #@flow(name="Reduce embedding dimensions", log_prints=True)
-def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, use_combined=False):
+def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, use_combined=False, tsne_implementation="sklearn"):
     """Reduce the dimensionality of the embedding vectors using t-SNE+PCA or UMAP"""
 
     # Determine input filename based on whether we're using combined data
@@ -105,7 +161,7 @@ def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parame
     logging.info(f"Loaded vectors with shape: {vectors.shape}")
 
     if reduction_parameters["reduction_method"] == "tsne":
-        reduce_with_tsne(vectors, run_id, reduction_parameters)
+        reduce_with_tsne(vectors, run_id, reduction_parameters, tsne_implementation)
 
 # run the flow!
 if __name__=="__main__":
@@ -137,8 +193,16 @@ if __name__=="__main__":
     parser.add_argument('--control', 
                         action='store_true',
                         help='Use combined dataset (original + control) for dimensionality reduction')
+    parser.add_argument('--tsne-implementation', 
+                        choices=['openTSNE', 'sklearn'],
+                        default='sklearn',
+                        help='Choose TSNE implementation: openTSNE or sklearn (default: sklearn)')
+    
     # Parse arguments
     args = parser.parse_args()
+
+    # Log the chosen TSNE implementation
+    logging.info(f"Using TSNE implementation: {args.tsne_implementation}")
 
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
@@ -166,6 +230,9 @@ if __name__=="__main__":
         if args.control:
             experiment_folder_name += "-combined"
         
+        # Add implementation suffix to folder name
+        experiment_folder_name += f"-{args.tsne_implementation}"
+        
         experiments_out_folder_path = os.path.join(experiments_in_folder_path, experiment_folder_name)
         reduction_parameters["experiment_out_path"] = experiments_out_folder_path
-        reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, args.control)
+        reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, args.control, args.tsne_implementation)
