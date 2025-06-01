@@ -61,7 +61,7 @@ def map_tsne_parameters(tsne_parameters, implementation, iteration_index):
 def create_standardized_filename_suffix(params, method_name, implementation):
     """Create standardized filename suffix for both implementations"""
     max_iter_value = params.get('max_iter', params.get('n_iter'))
-    return f"-vectors_tsne-{implementation}-{method_name}-{params['perplexity']}-{params['learning_rate']}-{max_iter_value}-{params['random_state']}"
+    return f"-vectors_tsne-{method_name}-{params['perplexity']}-{params['learning_rate']}-{max_iter_value}-{params['random_state']}"
 
 def log_tsne_iteration_start(params, method_name, implementation):
     """Standardized logging for TSNE iteration start"""
@@ -136,7 +136,7 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"
     return reduced_vectors
 
 #@flow(name="Reduce embedding dimensions", log_prints=True)
-def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, use_combined=False, tsne_implementation="sklearn"):
+def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, use_combined=False):
     """Reduce the dimensionality of the embedding vectors using t-SNE+PCA or UMAP"""
 
     # Determine input filename based on whether we're using combined data
@@ -161,6 +161,9 @@ def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parame
     logging.info(f"Loaded vectors with shape: {vectors.shape}")
 
     if reduction_parameters["reduction_method"] == "tsne":
+        # Get TSNE implementation from experiment parameters, default to sklearn
+        tsne_implementation = reduction_parameters.get("tsne_implementation", "sklearn")
+        logging.info(f"Using TSNE implementation from experiment config: {tsne_implementation}")
         reduce_with_tsne(vectors, run_id, reduction_parameters, tsne_implementation)
 
 # run the flow!
@@ -193,16 +196,9 @@ if __name__=="__main__":
     parser.add_argument('--control', 
                         action='store_true',
                         help='Use combined dataset (original + control) for dimensionality reduction')
-    parser.add_argument('--tsne-implementation', 
-                        choices=['openTSNE', 'sklearn'],
-                        default='sklearn',
-                        help='Choose TSNE implementation: openTSNE or sklearn (default: sklearn)')
     
     # Parse arguments
     args = parser.parse_args()
-
-    # Log the chosen TSNE implementation
-    logging.info(f"Using TSNE implementation: {args.tsne_implementation}")
 
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
@@ -230,9 +226,6 @@ if __name__=="__main__":
         if args.control:
             experiment_folder_name += "-combined"
         
-        # Add implementation suffix to folder name
-        experiment_folder_name += f"-{args.tsne_implementation}"
-        
         experiments_out_folder_path = os.path.join(experiments_in_folder_path, experiment_folder_name)
         reduction_parameters["experiment_out_path"] = experiments_out_folder_path
-        reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, args.control, args.tsne_implementation)
+        reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, args.control)
