@@ -171,6 +171,18 @@ processed_datasets/
 
 Notice that `.gz` is the compressed shard downloaded from BQ, the plain `.csv` shards will also be stored once decompressed as well as the fully joined corpus. Also, model output files may vary depending on the size of the model. Refer to the external documentation on how to properly interpret them.
 
+### Control dataset corpus
+
+Control data is useful for evaluating the resulting behaviour of the model. If a control dataset is present, it can be incorporated in the modeling but with a different treatment. Control data should not be used to calculate maximal repeats nor train the embeddings model, therefore it won't automatically fit with the previous stages. 
+
+We would like instead to create protein vectors out of control data but simply using the MRs from the real dataset and by creating the embeddings out of the real protein corpus. Therefore, once previous stages have been fulfilled for a real protein dataset, you may run
+
+```bash
+python -m corpus_prep.corpus_prep_control TIMESTAMP DATASET MR_FILTER PARTITION_RULE
+```
+
+This script will download the unique MR vocabulary from the processed stages in BigQuery corresponding to Run ID and, for each control protein, it will locally run the Aho-Corasick algorithm to efficiently find pattern matches and build the control partition corpus. The resulting corpus file will be placed in the same corresponding folder with the `s3_corpus_control_for_eval` suffix.
+
 ### Stage 3: Model evaluation - Protein vectors creation
 
 This is the third stage that comprises evaluating the trained model by computing the full vector for a protein based on the corresponding bioword (MRs) embeddings.
@@ -193,6 +205,22 @@ __Vector compute time__: currently, iterating over all 700k proteins and creatin
 
 For future processing, a folder `vector_output` will be created under the corresponding `Run ID` folder path, storing the metadata (labels) as a `*-metadata.tsv` and the biovectors as a `*-vectors_bio.tsv`.
 
+__Control data__: Use the `--control` flag to build the embeddings for the control dataset using the control corpus.
+
+__Memory map__: Use the `--mmap` flag to set the memory mapping feature in the FastText model loading. Load time will be longer but less RAM will be used up. Also, memory mapping allows for thread sharing of the model memory space.
+
+__Metadata__: Use the `--metadata` flag to only create the `metadata.tsv` output for the desired dataset.
+
+### Stage 3 bis: Embeddings combination
+
+If evaluating control data alongside real protein data, you will need to run the combination script before proceeding with the dimensionality reduction. This is because tSNE embeddings need to be calculated for both sets of data at the same time to properly compute lower dimensional groupings. Simply run:
+
+```bash
+python -m model_eval.model_combine_datasets TIMESTAMP DATASET MR_FILTER PARTITION_RULE
+```
+
+The `-combined` `*-metadata.tsv` and `*-vectors_bio.tsv` files will be placed in the corresponing `vector_output` folder.
+
 ### Stage 4: Model evaluation - Dimensionality reduction
 
 The protein vectors created in the previous step will be encoded in the same dimension space than the bioword embeddings (usually 100 or more). In order to work, visualize or analyze the data in a more manageable space, this step will transform the data into N dimensions (usually 2 or 3) by applying PCA+TSNE.
@@ -204,6 +232,7 @@ The proposed combination is first applying PCA to reduce to T dimensions (defaul
 ```json
 {
     "reduction_method" : "tsne",
+    "tsne_implementation" : "sklearn",
     "pca_n_components" : 50,
     "n_components" : [2],
     "random_state" : [0, 1000, 537, 1281, 2, 100, 100, 1133, 208, 400007, 200322, 4294967295, 5643728],
@@ -218,14 +247,15 @@ The proposed combination is first applying PCA to reduce to T dimensions (defaul
 
 Essentially, the max length array will determine how many parameter combinations will be run (when array length is 1, all combinations will use that value). Parameter values not contained in an array are always global for all combinations.
 
-- `barnes_hut` method for tSNE greatly reduces memory requirements than the `exact` method (otherwise the 700k protein set can't be processed).
+- `tsne_implementation` specifies which t-SNE implementation to use: `"sklearn"` (default) or `"openTSNE"`. This parameter is stored in the experiment configuration and doesn't affect folder or file naming.
+- `method`: determines the tSNE computation method. For sklearn implementation, `barnes_hut` greatly reduces memory requirements compared to the `exact` method (otherwise the 700k protein set can't be processed). For openTSNE, it will default to `auto` to let that framework decide based on dataset size.
 
 This `.json` file should be placed under an `experiments` folder within the corresponding `vector_output` for the desired `Run ID`
 
 Then, the whole script can be run as a plain python script:
 
 ```bash
-python -m model_eval.model_dim_reduction TIMETSTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_JSON_FILE_NAME
+python -m model_eval.model_dim_reduction TIMETSTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_JSON_FILE_NAME [--control]
 ```
 
 The output will be placed under a folder named after the `EXPERIMENT_JSON_FILE_NAME` and will contain `.tsv` files for each parameter combination run of tSNE, following the naming:
@@ -245,11 +275,19 @@ This is an interactive tool provided by TensorFlow to visualize vector projectio
 In order to set it up locally, you may run:
 
 ```bash
-python -m corpus_eval.tensorboard_setup <tsne|pca> DATASET TIMESTAMP MR_FILTER PARTITION_RULE
+python -m corpus_eval.tensorboard_setup <tsne|pca> TIMESTAMP DATASET MR_FILTER PARTITION_RULE [--control]
 ```
 
-By specifying either `tsne` or `pca` the script will look for the corresponding reduced projections, searching for the `.tsv` file under the `vector_output` folder for that `Run ID`. 
+By specifying either `tsne` or `pca` the script will look for the corresponding reduced projections, searching for the `.tsv` file under the `vector_output` folder for that `Run ID`. When running with `--control` the `-combined` embeddings data will be used. 
 
 When the setup ends, it will print in the console the exact command to run the TensorBoard server locally, which can then be accessed via the corresponding localhost URL and PORT.
 
 #### Chart visualizations
+
+For complete visualizations of the data, charts can be rendered using this script by running:
+
+```bash
+python -m model_eval.model_visualization TIMETSTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_JSON_FILE_NAME [--control]
+```
+
+It will look in the experiment output folder for all `.tsv` files generated by each experiment and will render the data points by labeling both for family name and for family type. Results will be placed under the `charts` subfolder in the corresponding experiment location.
