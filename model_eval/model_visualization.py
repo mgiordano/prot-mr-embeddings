@@ -10,6 +10,7 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 import math
 from matplotlib.patches import Rectangle
+import colorcet as cc
 
 from utils.utils import dataset_names, filters, partition_rules
 import utils.utils as utils
@@ -107,7 +108,8 @@ def create_large_scatter_plot(df, label_column, output_file=None, point_size=1, 
         
         # Assign colorful colors to non-control families
         if non_control_families:
-            colorful_palette = sns.color_palette('husl', n_colors=len(non_control_families))
+            colorful_palette = sns.color_palette(cc.glasbey, n_colors=len(non_control_families))
+            #colorful_palette = sns.color_palette('husl', n_colors=len(non_control_families))
             for idx, family in enumerate(sorted(non_control_families)):
                 colors[family] = colorful_palette[idx]
         
@@ -261,8 +263,8 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
                     merged_df, 
                     label_column, 
                     output_file=plot_output_path, 
-                    point_size=0.5, 
-                    alpha=1
+                    point_size=0.1, 
+                    alpha=0.2
                 )
                 
         except Exception as e:

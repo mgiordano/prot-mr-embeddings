@@ -20,3 +20,5 @@ colorcet
 holoviews
 pyahocorasick
 opentsne
+umap-learn
+colorcet

@@ -366,6 +366,9 @@ class filters():
         return MRFilter(condition= "BETWEEN", by="LENGTH(pattern)", 
                         value=f"{min_length} AND {max_length}", 
                         name=f"filter_keep_length_{str(min_length)}to{str(max_length)}")
+    
+    def create_filter_keep_len(length: int):
+        return MRFilter(condition= "=", by="LENGTH(pattern)", value=length, name=f"filter_keep_length_{str(length)}")
 
     MR_FILTER_NONE = MRFilter(by="1", condition="=", value="1", name="filter_none")
 
@@ -380,6 +383,10 @@ class filters():
     MR_FILTER_DROP_ALL = MRFilter(condition= "=", by="type", value="NONE", name="filter_drop_all")
 
     MR_FILTER_KEEP_4_10 = create_filter_keep_len_between(4, 10)
+
+    MR_FILTER_KEEP_5_7 = create_filter_keep_len_between(5, 7)
+
+    MR_FILTER_KEEP_8 = create_filter_keep_len(8)
 
 
 class partition_rules():

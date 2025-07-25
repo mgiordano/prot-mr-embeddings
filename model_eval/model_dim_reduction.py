@@ -26,6 +26,7 @@ def map_tsne_parameters(tsne_parameters, implementation, iteration_index):
     perplexity = get_param_value(tsne_parameters["perplexity"], iteration_index)
     learning_rate = get_param_value(tsne_parameters["learning_rate"], iteration_index)
     max_iter = get_param_value(tsne_parameters["max_iter"], iteration_index)
+    exaggeration = get_param_value(tsne_parameters["exaggeration"], iteration_index)
     
     # Handle optional n_jobs parameter - default to max CPU count if not specified
     if "n_jobs" in tsne_parameters and tsne_parameters["n_jobs"] is not None:
@@ -41,11 +42,12 @@ def map_tsne_parameters(tsne_parameters, implementation, iteration_index):
         "random_state": random_state,
         "perplexity": perplexity,
         "learning_rate": learning_rate,
-        "n_jobs": n_jobs 
+        "n_jobs": n_jobs,
+        "exaggeration": exaggeration,
     }
     if implementation == "openTSNE":
         # openTSNE parameter mapping
-        params["negative_gradient_method"] = "auto"
+        params["negative_gradient_method"] = "fft"
         method_name = params["negative_gradient_method"]
         params["n_iter"] = max_iter
     elif implementation == "sklearn":
@@ -72,7 +74,8 @@ def log_tsne_iteration_start(params, method_name, implementation):
                 f"method: {method_name} - "
                 f"max_iter: {params[max_iter_key]} - "
                 f"random_state: {params['random_state']} - "
-                f"n_jobs: {params['n_jobs']}")
+                f"n_jobs: {params['n_jobs']}"
+                f" - exaggeration: {params['exaggeration']}")
 
 #@task(log_prints=True)
 def compute_pca(vector_list, pca_parameters):
@@ -100,12 +103,18 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"
 
     experiment_out_path = tsne_parameters["experiment_out_path"]
     os.makedirs(experiment_out_path, exist_ok=True)
+
+    # Create PCA baseline for tsne comparison
+    pca_n_components = tsne_parameters["n_components"][0]
+    pca_parameters = {"n_components" : pca_n_components}
+    pca_baseline_vectors = compute_pca(vectors, pca_parameters)
+    utils.save_vectors_to_tsv(pca_baseline_vectors, run_id, "-vectors_pca-"+str(pca_n_components), experiment_out_path)
     
     # Apply PCA to do a more efficient and first dimensionality reduction
-    pca_n_componenets = tsne_parameters["pca_n_components"]
-    pca_parameters = {"n_components" : pca_n_componenets}
+    pca_n_components = tsne_parameters["pca_n_components"]
+    pca_parameters = {"n_components" : pca_n_components}
     pca_reduced_vectors = compute_pca(vectors, pca_parameters)
-    utils.save_vectors_to_tsv(pca_reduced_vectors, run_id, "-vectors_pca-"+str(pca_n_componenets), experiment_out_path)
+    utils.save_vectors_to_tsv(pca_reduced_vectors, run_id, "-vectors_pca-"+str(pca_n_components), experiment_out_path)
 
     # Apply TSNE to do final dimensionality reduction to 2D
     max_iterations = max(len(tsne_parameters[key]) if isinstance(tsne_parameters[key], list) else 0 for key in tsne_parameters.keys())
