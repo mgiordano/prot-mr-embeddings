@@ -1,0 +1,1091 @@
+"""
+Enhanced Model Visualization Script
+==================================
+
+This module provides enhanced visualization for t-SNE and UMAP experiment results
+with improved styling, consistent coloring, and flexible layout options.
+
+Features:
+- Integrated thesis styling for consistent, professional plots
+- Alphabetical ordering of protein families for consistent coloring
+- Single and grid visualization modes
+- Separate experiment parameter legend box
+- Support for both family_name and family_type chart types
+"""
+
+import os
+import sys
+import argparse
+import logging
+import glob
+import pandas as pd
+import numpy as np
+from dotenv import dotenv_values
+import seaborn as sns
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
+from matplotlib.patches import Rectangle
+import math
+import colorcet as cc
+
+
+from utils.utils import dataset_names, filters, partition_rules
+import utils.utils as utils
+
+# ===============================
+# GLOBAL COLOR PALETTE
+# ===============================
+
+# Custom color palette with specific hex colors
+CUSTOM_COLOR_PALETTE = [
+    '#ea0202',
+    '#ffa087',
+    '#a98585',  
+    '#d43c00',
+    '#ec4300',
+    '#db6630',
+    '#cf6300',
+    '#864d18',
+    '#904500',
+    '#60543e',
+    "#201d16",
+    '#ff9500',
+    '#ff9a14',
+    '#fbba00',
+    '#ffff0e',
+    '#a89a03',
+    '#d4f75b', 
+    '#839f77',
+    '#79e209',
+    '#01ac00',
+    '#01ff01',
+    '#009524',
+    '#009d37',
+    '#46856a',
+    '#3aeba5',
+    '#1e8e78',
+    '#02e2c7',
+    '#009ba0',
+    '#006869',
+    '#00618c', 
+    '#4ccdff',
+    '#52a9f0',
+    '#4faaf1',
+    '#0200fc',
+    '#9587ff',
+    '#542d9a',
+    '#7e00c5',
+    '#c82bd2', 
+    '#ff00ff', 
+    '#fe30c3',
+    '#ff00bb',
+    '#b5569a', 
+    '#96258d',  
+    '#d4002d',
+    '#bf3362',
+    '#f80079'
+    
+]
+
+# Convert hex colors to RGB tuples for matplotlib
+def hex_to_rgb(hex_color):
+    """Convert hex color string to RGB tuple with values between 0-1."""
+    hex_color = hex_color.lstrip('#')
+    return tuple(int(hex_color[i:i+2], 16)/255 for i in (0, 2, 4))
+
+# Convert all hex colors to RGB tuples
+CUSTOM_COLOR_PALETTE_RGB = [hex_to_rgb(color) for color in CUSTOM_COLOR_PALETTE]
+
+# ===============================
+# INTEGRATED THESIS STYLING
+# ===============================
+
+# ===============================
+# INTEGRATED THESIS STYLING
+# ===============================
+
+def setup_thesis_style():
+    """
+    Configure matplotlib for consistent styling that matches the original script.
+    This function should be called at the beginning of all plotting scripts.
+    """
+    # Use minimal styling to match original - no seaborn style
+    
+    # Configure matplotlib parameters for consistency
+    plt.rcParams.update({
+        # Figure settings
+        'figure.figsize': (12, 8),  # Match original default
+        'figure.dpi': 300,
+        'savefig.dpi': 300,
+        'savefig.bbox': 'tight',
+        'savefig.pad_inches': 0.1,
+        'savefig.facecolor': 'white',
+        
+        # Font settings - match original
+        'font.size': 12,
+        'axes.titlesize': 14,
+        'axes.labelsize': 12,
+        'xtick.labelsize': 12,
+        'ytick.labelsize': 12,
+        'legend.fontsize': 12,
+        'legend.title_fontsize': 12,
+        
+        # Layout
+        'axes.titlepad': 20,
+        'axes.labelpad': 10,
+    })
+
+def get_thesis_colors():
+    """
+    Return a consistent color palette for thesis charts - modern scientific style.
+    
+    Returns:
+        dict: Dictionary with color schemes for different chart types
+    """
+    return {
+        'primary': '#3498db',      # Modern blue
+        'secondary': '#e74c3c',    # Modern red
+        'tertiary': '#2ecc71',     # Modern green
+        'quaternary': '#f39c12',   # Modern orange
+        'success': '#27ae60',      # Success green
+        'warning': '#f39c12',      # Warning orange
+        'info': '#3498db',         # Info blue
+        'neutral': '#95a5a6',      # Modern gray
+        
+        # Modern color palettes for different chart types
+        'categorical': ['#3498db', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6', '#34495e', '#e67e22', '#95a5a6'],
+        'sequential': 'viridis',
+        'diverging': 'RdBu_r',
+        'qualitative': 'Set2',
+        'single_color': '#3498db',  # For single-series plots
+        
+        # Specific modern colors for scientific plots
+        'uniform_bar': '#fdeaea',   # Light pink for uniform baseline
+        'natural_line': '#e74c3c'   # Vibrant red for natural data
+    }
+
+def save_figure(fig, filename, format='png', **kwargs):
+    """
+    Save figure with consistent settings for thesis.
+    
+    Args:
+        fig: matplotlib figure object
+        filename (str): output filename
+        format (str): file format ('png', 'pdf', 'svg')
+        **kwargs: additional arguments for savefig
+    """
+    default_kwargs = {
+        'dpi': 300,
+        'bbox_inches': 'tight',
+        'facecolor': 'white',
+        'edgecolor': 'none',
+        'pad_inches': 0.1
+    }
+    default_kwargs.update(kwargs)
+    
+    fig.savefig(filename, format=format, **default_kwargs)
+    print(f"Figure saved: {filename}")
+
+def format_axes(ax, title=None, xlabel=None, ylabel=None, 
+                title_fontweight='bold', label_fontweight='normal'):
+    """
+    Apply consistent formatting to axes.
+    
+    Args:
+        ax: matplotlib axes object
+        title (str): plot title
+        xlabel (str): x-axis label
+        ylabel (str): y-axis label
+        title_fontweight (str): font weight for title
+        label_fontweight (str): font weight for axis labels
+    """
+    if title:
+        ax.set_title(title, fontweight=title_fontweight, pad=20)
+    if xlabel:
+        ax.set_xlabel(xlabel, fontweight=label_fontweight)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontweight=label_fontweight)
+
+# ===============================
+# PARAMETER PARSING
+# ===============================
+
+def parse_filename_parameters(filename):
+    """
+    Parse experiment parameters from filename.
+    Supports both t-SNE and UMAP formats.
+    """
+    # Remove file extension and get the base filename
+    base_filename = os.path.splitext(os.path.basename(filename))[0]
+    
+    # Split parameters by '-'
+    params = base_filename.split('-')
+    
+
+    
+    # Common parameters
+    timestamp = params[0]
+    dataset = params[1]
+    filter_type = params[2].replace('filter_', '')
+    partition = params[3].replace('partition_', '')
+    vectors_method = params[4].replace('vectors_', '')
+    
+    if 'tsne' in vectors_method:
+        # t-SNE format: method-perplexity-learning_rate-max_iterations-random_state
+        # Handle variable parameter lengths safely
+        method = params[5] if len(params) > 5 else 'unknown'
+        perplexity = params[6] if len(params) > 6 else 'unknown'
+        learning_rate = params[7] if len(params) > 7 else 'unknown'
+        max_iterations = params[8] if len(params) > 8 else 'unknown'
+        random_state = params[9] if len(params) > 9 else 'unknown'
+        
+        return {
+            'timestamp': timestamp,
+            'dataset': dataset,
+            'filter': filter_type,
+            'partition': partition,
+            'vectors_method': vectors_method,
+            'method': method,
+            'perplexity': perplexity,
+            'learning_rate': learning_rate,
+            'max_iterations': max_iterations,
+            'random_state': random_state,
+            'type': 'tsne'
+        }
+    
+    elif 'umap' in vectors_method:
+        # UMAP format: metric-n_neighbors-learning_rate-n_epochs-min_dist-spread-random_state
+        # Handle variable parameter lengths safely
+        metric = params[5] if len(params) > 5 else 'unknown'
+        n_neighbors = params[6] if len(params) > 6 else 'unknown'
+        learning_rate = params[7] if len(params) > 7 else 'unknown'
+        n_epochs = params[8] if len(params) > 8 else 'unknown'
+        min_dist = params[9] if len(params) > 9 else 'unknown'
+        spread = params[10] if len(params) > 10 else 'unknown'
+        random_state = params[11] if len(params) > 11 else 'unknown'
+        
+        return {
+            'timestamp': timestamp,
+            'dataset': dataset,
+            'filter': filter_type,
+            'partition': partition,
+            'vectors_method': vectors_method,
+            'metric': metric,
+            'n_neighbors': n_neighbors,
+            'learning_rate': learning_rate,
+            'n_epochs': n_epochs,
+            'min_dist': min_dist,
+            'spread': spread,
+            'random_state': random_state,
+            'type': 'umap'
+        }
+    
+    else:
+        # Default/unknown format
+        return {
+            'timestamp': timestamp,
+            'dataset': dataset,
+            'filter': filter_type,
+            'partition': partition,
+            'vectors_method': vectors_method,
+            'type': 'unknown'
+        }
+
+def create_experiment_params_text(params):
+    """
+    Create formatted text for experiment parameters.
+    
+    Args:
+        params (dict): Parsed parameters from filename
+        
+    Returns:
+        str: Formatted parameter text
+    """
+    if params['type'] == 'tsne':
+        return (f"t-SNE Parameters:\n"
+                f"Method: {params['method']}\n"
+                f"Perplexity: {params['perplexity']}\n"
+                f"Learning Rate: {params['learning_rate']}\n"
+                f"Max Iter: {params['max_iterations']}\n"
+                f"Filter: {params['filter']}\n"
+                f"Partition: {params['partition']}")
+    
+    elif params['type'] == 'umap':
+        return (f"UMAP Parameters:\n"
+                f"Metric: {params['metric']}\n"
+                f"n_neighbors: {params['n_neighbors']}\n"
+                f"Learning Rate: {params['learning_rate']}\n"
+                f"n_epochs: {params['n_epochs']}\n"
+                f"min_dist: {params['min_dist']}\n"
+                f"Filter: {params['filter']}\n"
+                f"Partition: {params['partition']}")
+    
+    else:
+        return (f"Experiment Parameters:\n"
+                f"Filter: {params['filter']}\n"
+                f"Partition: {params['partition']}")
+
+# ===============================
+# COLOR AND LEGEND MANAGEMENT
+# ===============================
+
+def sort_colors_by_hue(colors):
+    """
+    Sort a list of RGB colors by their hue value with improved natural progression.
+    
+    This enhanced version creates a more visually pleasing color progression by:
+    1. Using HSL color space instead of HSV for better perceptual ordering
+    2. Handling special cases like very dark/light colors
+    3. Ensuring smooth transitions between similar hues
+    
+    Args:
+        colors (list): List of RGB color tuples
+        
+    Returns:
+        list: Same colors sorted in a natural, visually pleasing hue order
+    """
+    import colorsys
+    import numpy as np
+    
+    # Convert RGB to HSL and store original indices
+    hsl_colors = []
+    for i, rgb in enumerate(colors):
+        h, l, s = colorsys.rgb_to_hls(rgb[0], rgb[1], rgb[2])
+        
+        # Calculate color intensity and saturation metrics
+        intensity = l
+        saturation = s
+        
+        # Store as (hue, lightness, saturation, intensity, original_index)
+        hsl_colors.append((h, l, s, intensity, i))
+    
+    # First separate grayscale (very low saturation) from colorful colors
+    gray_threshold = 0.15  # Threshold for considering a color as "gray"
+    grays = [c for c in hsl_colors if c[2] < gray_threshold]
+    colors_hsl = [c for c in hsl_colors if c[2] >= gray_threshold]
+    
+    # Sort colorful colors by hue
+    colors_hsl.sort(key=lambda x: x[0])
+    
+    # Sort grays by lightness (dark to light)
+    grays.sort(key=lambda x: x[1])
+    
+    # Combine: first colorful colors in hue order, then grays from dark to light
+    sorted_indices = [i for _, _, _, _, i in colors_hsl + grays]
+    
+    # Return RGB colors in the new order
+    return [colors[i] for i in sorted_indices]
+
+def generate_improved_color_palette(n_colors):
+    """
+    Generate an improved color palette with better perceptual spacing and ordering.
+    
+    This creates a palette that:
+    1. Has good perceptual separation between colors
+    2. Follows a natural hue progression
+    3. Maintains good contrast and readability
+    
+    Args:
+        n_colors (int): Number of colors needed
+        
+    Returns:
+        list: List of RGB color tuples
+    """
+    import colorsys
+    import numpy as np
+    
+    if n_colors <= 1:
+        return [(0.2, 0.4, 0.8)]  # Default blue
+    
+    # Start with glasbey_light for good distinctness
+    base_palette = sns.color_palette(cc.glasbey_light, n_colors=n_colors)
+    
+    # Sort by hue for natural progression
+    sorted_palette = sort_colors_by_hue(base_palette)
+        
+    return sorted_palette
+    
+    return sorted_palette
+
+def generate_consistent_color_palette(labels, control_families=None):
+    """
+    Generate a consistent color palette for labels with alphabetical ordering.
+    Colors are sorted by hue for easier legend navigation.
+    
+    Args:
+        labels (list): List of unique labels
+        control_families (set, optional): Set of control family names
+        
+    Returns:
+        dict: Mapping of labels to colors
+    """
+    # Sort labels alphabetically to ensure consistency
+    sorted_labels = sorted(labels)
+    
+    # Separate control and non-control families if control_families is provided
+    if control_families:
+        control_labels = [label for label in sorted_labels if label in control_families]
+        non_control_labels = [label for label in sorted_labels if label not in control_families]
+        
+        colors = {}
+        
+        # Assign colorful colors to non-control families
+        if non_control_labels:
+            # Use improved color palette for non-control families
+            colorful_palette = generate_improved_color_palette(len(non_control_labels))
+            for idx, family in enumerate(non_control_labels):  # Already sorted
+                colors[family] = colorful_palette[idx]
+        
+        # Assign gray shades to control families
+        if control_labels:
+            # For control families, use grayscale with good separation
+            lightness_values = np.linspace(0.3, 0.7, len(control_labels))
+            gray_palette = [(l, l, l) for l in lightness_values]
+            
+            for idx, family in enumerate(control_labels):  # Already sorted
+                colors[family] = gray_palette[idx]
+        
+        return colors
+    
+    else:
+        # Standard coloring for all labels
+        color_palette = generate_improved_color_palette(len(sorted_labels))
+        
+        colors = {}
+        for idx, label in enumerate(sorted_labels):
+            colors[label] = color_palette[idx]
+        
+        return colors
+
+def optimize_legend_columns(num_labels, fig_height):
+    """
+    Calculate optimal number of legend columns based on figure height.
+    
+    Args:
+        num_labels (int): Number of legend entries
+        fig_height (float): Figure height in inches
+        
+    Returns:
+        int: Optimal number of columns
+    """
+    # Approximate height of each legend entry in inches
+    entry_height = 0.25
+    # Available height in inches (considering figure height and margins)
+    available_height = fig_height * 0.9
+    # Maximum entries per column
+    max_entries_per_column = math.floor(available_height / entry_height)
+    # Calculate optimal number of columns
+    return math.ceil(num_labels / max_entries_per_column)
+
+# ===============================
+# CORE PLOTTING FUNCTIONS
+# ===============================
+
+def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=0.1, alpha=0.5, 
+                                xlim=None, ylim=None, show_params=True):
+    """
+    Create an enhanced scatter plot with consistent styling and improved legends.
+    
+    Args:
+        df (DataFrame): Data containing reduced vectors and labels
+        label_column (str): Column name to use for coloring
+        output_file (str, optional): Path to save the plot
+        point_size (float): Size of scatter points
+        alpha (float): Transparency of points
+        xlim (tuple, optional): X-axis limits
+        ylim (tuple, optional): Y-axis limits
+        show_params (bool): Whether to show experiment parameters
+        
+    Returns:
+        tuple: (fig, ax) matplotlib objects
+    """
+    # Setup thesis style
+    setup_thesis_style()
+    
+    # Create figure with appropriate size
+    fig = plt.figure(figsize=(12, 8))
+    ax = fig.add_subplot(111)
+    
+    # Get unique labels and sort alphabetically
+    unique_labels = sorted(df[label_column].unique())
+    
+    # Determine if we have control families for special handling
+    control_families = None
+    if label_column == "sequence_family_name" and "sequence_family_type" in df.columns:
+        control_families = set()
+        for label in unique_labels:
+            family_data = df[df[label_column] == label]
+            if (family_data["sequence_family_type"] == "control").any():
+                control_families.add(label)
+    
+    # Generate consistent color palette
+    colors = generate_consistent_color_palette(unique_labels, control_families)
+    
+    # Create scatter plots with alphabetically consistent colors
+    for label in unique_labels:
+        mask = df[label_column] == label
+        ax.scatter(df.loc[mask, 'reduced_vector_d1'],
+                  df.loc[mask, 'reduced_vector_d2'],
+                  c=[colors[label]], label=label,
+                  alpha=alpha, s=point_size)
+    
+    # Create custom legend with alphabetically ordered entries
+    legend_elements = []
+    for label in unique_labels:
+        legend_elements.append(
+            Rectangle((0, 0), 1, 1, fc=colors[label], 
+                     label=label, alpha=1)  # Use full opacity for legend
+        )
+    
+    # Calculate optimal number of columns for main legend
+    n_cols = optimize_legend_columns(len(unique_labels), fig.get_figheight())
+    
+    # Add main legend with optimized columns
+    main_legend = ax.legend(handles=legend_elements, 
+                           bbox_to_anchor=(1.05, 1),
+                           loc='upper left',
+                           borderaxespad=0.,
+                           ncol=n_cols,
+                           title=label_column.replace('_', ' ').title())
+    
+    # Add experiment parameters legend if requested and output_file is provided
+    if show_params and output_file:
+        params = parse_filename_parameters(output_file)
+        params_text = create_experiment_params_text(params)
+        
+        # Create parameter text box in the lower right corner of the plot area
+        ax.text(0.98, 0.02, params_text,
+                transform=ax.transAxes,
+                fontsize=10,
+                verticalalignment='bottom',
+                horizontalalignment='right',
+                bbox=dict(boxstyle='round,pad=0.5', 
+                         facecolor='white', 
+                         edgecolor='gray', 
+                         alpha=0.9,
+                         linewidth=1))
+    
+    # Format axes with thesis styling
+    format_axes(ax, 
+                xlabel="Dimension 1", 
+                ylabel="Dimension 2")
+    
+    # Set axis limits if provided
+    if xlim:
+        ax.set_xlim(xlim[0], xlim[1])
+    if ylim:
+        ax.set_ylim(ylim[0], ylim[1])
+    
+    # Adjust layout to prevent legend cutoff
+    plt.tight_layout()
+    
+    return fig, ax
+
+def create_grid_visualization(vector_files, metadata_file_path, label_column, 
+                             output_file=None, point_size=0.1, alpha=0.2, legend_title=None):
+    """
+    Create a grid visualization showing multiple experiments in a single figure.
+    
+    Args:
+        vector_files (list): List of vector file paths
+        metadata_file_path (str): Path to metadata file
+        label_column (str): Column name to use for coloring
+        output_file (str, optional): Path to save the plot
+        point_size (float): Size of scatter points
+        alpha (float): Transparency of points
+        
+    Returns:
+        tuple: (fig, axes) matplotlib objects
+    """
+    # Setup thesis style
+    setup_thesis_style()
+    
+    # Determine grid dimensions
+    n_files = len(vector_files)
+    n_cols = min(3, n_files)  # Maximum 3 columns
+    n_rows = math.ceil(n_files / n_cols)
+    
+
+    
+    # Create figure with appropriate size
+    fig_width = 6 * n_cols
+    fig_height = 5 * n_rows
+    # Add extra height for the legend at the bottom - estimate based on file count
+    # We'll adjust based on actual label count later
+    legend_height = 1.5
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height + legend_height))
+    
+    # Handle different subplot array cases
+    if n_files == 1:
+        # Single subplot - axes is a single Axes object
+        axes = [axes]
+    elif n_rows == 1 and n_cols > 1:
+        # Single row, multiple columns - axes is 1D array
+        pass  # axes is already correct as 1D array
+    elif n_cols == 1 and n_rows > 1:
+        # Single column, multiple rows - axes is 1D array
+        pass  # axes is already correct as 1D array
+    # For multiple rows and columns, axes is already a 2D array
+    
+    # Sort vector files by perplexity parameter for t-SNE or n_neighbors for UMAP
+    def get_sort_key(filename):
+        try:
+            params = parse_filename_parameters(filename)
+            if params['type'] == 'tsne':
+                return int(params['perplexity'])
+            elif params['type'] == 'umap':
+                return int(params['n_neighbors'])
+            else:
+                return 0
+        except:
+            return 0
+    
+    vector_files = sorted(vector_files, key=get_sort_key)
+    
+    # Load metadata once
+    metadata_df = pd.read_csv(metadata_file_path, sep='\t')
+    metadata_df.reset_index(inplace=True)
+    metadata_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+    
+    # Get all unique labels across all experiments for consistent coloring
+    all_labels = set()
+    all_data = []
+    
+    for vector_file in vector_files:
+        try:
+            # Load vector data
+            vectors_df = pd.read_csv(vector_file, sep='\t', dtype=np.float32)
+            vectors_df.columns = ['reduced_vector_d1', 'reduced_vector_d2']
+            vectors_df.reset_index(inplace=True)
+            vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+            
+            # Merge with metadata
+            merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+            all_data.append(merged_df)
+            
+            # Collect unique labels
+            if label_column in merged_df.columns:
+                all_labels.update(merged_df[label_column].unique())
+                
+        except Exception as e:
+            logging.error(f"Error loading {vector_file}: {str(e)}")
+            all_data.append(None)
+    
+    # Sort labels alphabetically for consistent coloring
+    unique_labels = sorted(all_labels)
+    
+    # Determine if we have control families
+    control_families = None
+    if label_column == "sequence_family_name" and len(all_data) > 0 and all_data[0] is not None:
+        if "sequence_family_type" in all_data[0].columns:
+            control_families = set()
+            for df in all_data:
+                if df is not None:
+                    for label in unique_labels:
+                        family_data = df[df[label_column] == label]
+                        if not family_data.empty and (family_data["sequence_family_type"] == "control").any():
+                            control_families.add(label)
+    
+    # Generate consistent color palette for all subplots
+    colors = generate_consistent_color_palette(unique_labels, control_families)
+    
+    # Create subplots
+    for i, (vector_file, merged_df) in enumerate(zip(vector_files, all_data)):
+        row = i // n_cols
+        col = i % n_cols
+        
+        # Handle different axes array shapes correctly
+        if n_files == 1:
+            # Single subplot
+            ax = axes[0] if isinstance(axes, list) else axes
+        elif n_rows == 1 and n_cols > 1:
+            # Single row, multiple columns - axes is 1D array
+            ax = axes[col]
+        elif n_cols == 1 and n_rows > 1:
+            # Single column, multiple rows - axes is 1D array  
+            ax = axes[row]
+        else:
+            # Multiple rows and columns - axes is 2D array
+            ax = axes[row, col]
+        
+        if merged_df is None:
+            ax.text(0.5, 0.5, 'Error loading data', transform=ax.transAxes, 
+                   ha='center', va='center', fontsize=12)
+            ax.set_title(f"Error: {os.path.basename(vector_file)}")
+            continue
+        
+        # Create scatter plot with consistent colors
+        for label in unique_labels:
+            if label in merged_df[label_column].values:
+                mask = merged_df[label_column] == label
+                ax.scatter(merged_df.loc[mask, 'reduced_vector_d1'],
+                          merged_df.loc[mask, 'reduced_vector_d2'],
+                          c=[colors[label]], label=label,
+                          alpha=alpha, s=point_size)
+        
+        # Parse parameters for subtitle - lean format
+        params = parse_filename_parameters(vector_file)
+        
+        if params['type'] == 'tsne':
+            subtitle = f"Perplexity = {params['perplexity']}"
+        elif params['type'] == 'umap':
+            subtitle = f"n_neighbors: {params['n_neighbors']}"
+        else:
+            subtitle = os.path.basename(vector_file)
+        
+        # Format subplot with normal font weight
+        ax.set_title(subtitle, fontweight='normal')
+        if row == n_rows - 1:
+            ax.set_xlabel("Dim 1")
+        if col == 0:
+            ax.set_ylabel("Dim 2")
+        
+        # Remove individual legends for subplots
+        ax.legend().set_visible(False)
+    
+    # Hide empty subplots
+    total_subplots = n_rows * n_cols
+    for i in range(n_files, total_subplots):
+        row = i // n_cols
+        col = i % n_cols
+        
+        # Handle different axes array shapes for hiding subplots
+        if n_rows == 1 and n_cols > 1:
+            axes[col].set_visible(False)
+        elif n_cols == 1 and n_rows > 1:
+            axes[row].set_visible(False)
+        elif n_rows > 1 and n_cols > 1:
+            axes[row, col].set_visible(False)
+        # For single subplot case, no empty subplots to hide
+    
+    # Create shared legend
+    legend_elements = []
+    for label in unique_labels:
+        legend_elements.append(
+            Rectangle((0, 0), 1, 1, fc=colors[label], 
+                     label=label, alpha=1)
+        )
+    
+    # Add shared legend at the bottom with more columns for horizontal layout
+    # Calculate columns for bottom legend (more columns, shorter)
+    max_cols_per_row = 10  # Increase number of columns to make legend more compact
+    n_cols = min(max_cols_per_row, len(unique_labels))
+    
+    # Position legend outside the figure area, below the plots
+    # Use custom legend title if provided, otherwise default
+    if legend_title is None:
+        legend_title = label_column.replace('_', ' ').title()
+    
+    fig.legend(handles=legend_elements, 
+              loc='upper center',
+              bbox_to_anchor=(0.5, 0.15),  # Position just below the figure
+              bbox_transform=fig.transFigure,
+              title=legend_title,
+              ncol=n_cols,
+              columnspacing=0.8,  # Reduce space between columns
+              handletextpad=0.4)  # Reduce space between handle and text
+    
+    # Remove overall title as requested
+    
+    # Adjust layout for bottom legend
+    plt.tight_layout()
+    # Calculate bottom margin based on number of unique labels and add more vertical space between rows
+    label_count = len(unique_labels)
+    # Estimate legend height based on number of rows it will take
+    legend_rows = math.ceil(label_count / max_cols_per_row)
+    # Reserve space for legend: base margin + space for legend rows
+    bottom_margin = 0.05 + (legend_rows * 0.03)  # More precise calculation
+    plt.subplots_adjust(bottom=bottom_margin, hspace=0.4)  # Add vertical space between rows
+    
+    return fig, axes
+
+# ===============================
+# DATA LOADING
+# ===============================
+
+def load_and_merge_data(vector_file_path, metadata_file_path):
+    """
+    Load vector data and merge with metadata.
+    
+    Args:
+        vector_file_path (str): Path to vector TSV file
+        metadata_file_path (str): Path to metadata TSV file
+        
+    Returns:
+        DataFrame: Merged dataframe with vectors and metadata
+    """
+    logging.info(f"START TASK - load_and_merge_data for {os.path.basename(vector_file_path)}")
+    
+    # Load vector data
+    logging.info(f"Loading vector data from: {vector_file_path}")
+    vectors_df = pd.read_csv(vector_file_path, sep='\t', dtype=np.float32)
+    
+    # Rename columns to match expected format
+    vectors_df.columns = ['reduced_vector_d1', 'reduced_vector_d2']
+    
+    # Add index to match with metadata
+    vectors_df.reset_index(inplace=True)
+    vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+    
+    # Load metadata
+    logging.info(f"Loading metadata from: {metadata_file_path}")
+    metadata_df = pd.read_csv(metadata_file_path, sep='\t')
+    metadata_df.reset_index(inplace=True)
+    metadata_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+    
+    # Merge dataframes
+    merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+    
+    logging.info(f"Merged dataset shape: {merged_df.shape}")
+    logging.info("END TASK - load_and_merge_data")
+    
+    return merged_df
+
+# ===============================
+# MAIN PROCESSING FUNCTIONS
+# ===============================
+
+def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_id, 
+                               output_folder_path, mode='single', chart_type='name', 
+                               use_combined=False):
+    """
+    Create plots for all TSV files in the experiment folder.
+    
+    Args:
+        experiment_folder_path (str): Path to experiment folder
+        metadata_file_path (str): Path to metadata file
+        run_id (str): Run identifier
+        output_folder_path (str): Output folder path
+        mode (str): 'single' or 'grid' visualization mode
+        chart_type (str): 'name' or 'type' for family labeling
+        use_combined (bool): Whether using combined dataset
+    """
+    logging.info("START TASK - create_plots_for_experiment")
+    
+    # Find all TSV files in experiment folder (excluding metadata files)
+    tsv_pattern = os.path.join(experiment_folder_path, "*.tsv")
+    tsv_files = glob.glob(tsv_pattern)
+    
+    # Filter for vector files (both t-SNE and UMAP)
+    vector_files = [f for f in tsv_files if any(method in os.path.basename(f) 
+                   for method in ['vectors_tsne', 'vectors_umap'])]
+    
+    if not vector_files:
+        logging.warning(f"No vector files found in {experiment_folder_path}")
+        return
+    
+    logging.info(f"Found {len(vector_files)} vector files to process")
+    
+    # Create charts subfolder inside the experiment folder
+    charts_folder = os.path.join(experiment_folder_path, "charts")
+    os.makedirs(charts_folder, exist_ok=True)
+    
+    # Determine label columns based on chart_type
+    if chart_type == 'name':
+        label_columns = ["sequence_family_name"]
+    elif chart_type == 'type':
+        label_columns = ["sequence_family_type"]
+    else:
+        label_columns = ["sequence_family_name", "sequence_family_type"]
+    
+    # Process based on mode
+    if mode == 'single':
+        # Create individual plots for each vector file and label column
+        for vector_file in vector_files:
+            logging.info(f"Processing vector file: {os.path.basename(vector_file)}")
+            
+            try:
+                # Load and merge data
+                merged_df = load_and_merge_data(vector_file, metadata_file_path)
+                
+                # Create plots for each label column
+                for label_column in label_columns:
+                    if label_column not in merged_df.columns:
+                        logging.warning(f"Label column '{label_column}' not found in metadata. Skipping.")
+                        continue
+                    
+                    # Generate output filename
+                    base_filename = os.path.splitext(os.path.basename(vector_file))[0]
+                    plot_filename = f"{base_filename}-{label_column}.png"
+                    plot_output_path = os.path.join(charts_folder, plot_filename)
+                    
+                    logging.info(f"Creating plot for {label_column}: {plot_filename}")
+                    
+                    # Create the enhanced plot
+                    fig, ax = create_enhanced_scatter_plot(
+                        merged_df, 
+                        label_column, 
+                        output_file=plot_output_path, 
+                        point_size=0.1, 
+                        alpha=0.2
+                    )
+                    
+                    # Save the plot
+                    save_figure(fig, plot_output_path)
+                    plt.close(fig)
+                    
+            except Exception as e:
+                logging.error(f"Error processing {vector_file}: {str(e)}")
+                continue
+    
+    elif mode == 'grid':
+        # Create grid visualizations for each label column
+        for label_column in label_columns:
+            logging.info(f"Creating grid visualization for {label_column}")
+            
+            # Generate output filename for grid
+            grid_filename = f"grid-{chart_type}-{label_column}.png"
+            grid_output_path = os.path.join(charts_folder, grid_filename)
+            
+            try:
+                # Create grid visualization
+                fig, axes = create_grid_visualization(
+                    vector_files,
+                    metadata_file_path,
+                    label_column,
+                    output_file=grid_output_path,
+                    point_size=0.05,
+                    alpha=0.1,
+                    legend_title="Familias de proteínas"  # Customize this as needed
+                )
+                
+                # Save the grid plot
+                save_figure(fig, grid_output_path)
+                plt.close(fig)
+                
+                logging.info(f"Grid plot saved: {grid_filename}")
+                
+            except Exception as e:
+                logging.error(f"Error creating grid visualization for {label_column}: {str(e)}")
+                continue
+    
+    logging.info("END TASK - create_plots_for_experiment")
+
+def create_visualization_plots(input_data_root_path, family_dataset_name, timestamp, 
+                             filter_name, partition_rule_name, experiment_name, 
+                             mode='single', chart_type='name', use_combined=False):
+    """
+    Main function to create visualization plots for experiment results.
+    
+    Args:
+        input_data_root_path (str): Root path for input data
+        family_dataset_name (str): Dataset name
+        timestamp (str): Timestamp identifier
+        filter_name (str): Filter name
+        partition_rule_name (str): Partition rule name
+        experiment_name (str): Experiment name
+        mode (str): 'single' or 'grid' visualization mode
+        chart_type (str): 'name' or 'type' for family labeling
+        use_combined (bool): Whether to use combined dataset
+    """
+    logging.info("START FLOW ******************* Create Enhanced Visualization Plots *******************")
+    
+    # Create output structure
+    date = utils.get_date_from_formatted_ts(timestamp)
+    vector_output_folder_path = os.path.join(input_data_root_path, family_dataset_name, date, "vector_output")
+    
+    # Determine run ID and metadata file path
+    run_id = timestamp + "-" + family_dataset_name + "-" + filter_name + "-" + partition_rule_name
+    
+    if use_combined:
+        run_id_for_metadata = run_id + "-combined"
+        metadata_filename = run_id_for_metadata + "-metadata.tsv"
+        experiment_folder_name = experiment_name + "-combined"
+    else:
+        metadata_filename = run_id + "-metadata.tsv"
+        experiment_folder_name = experiment_name
+    
+    metadata_file_path = os.path.join(vector_output_folder_path, metadata_filename)
+    
+    # Check if metadata file exists
+    if not os.path.exists(metadata_file_path):
+        if use_combined:
+            raise FileNotFoundError(f"Combined metadata file not found: {metadata_file_path}. "
+                                  f"Please run model_combine_datasets.py first.")
+        else:
+            raise FileNotFoundError(f"Metadata file not found: {metadata_file_path}")
+    
+    # Locate experiment folder
+    experiments_folder_path = os.path.join(vector_output_folder_path, "experiments")
+    experiment_folder_path = os.path.join(experiments_folder_path, experiment_folder_name)
+    
+    if not os.path.exists(experiment_folder_path):
+        raise FileNotFoundError(f"Experiment folder not found: {experiment_folder_path}")
+    
+    logging.info(f"Processing experiment folder: {experiment_folder_path}")
+    logging.info(f"Using metadata file: {metadata_file_path}")
+    logging.info(f"Mode: {mode}, Chart type: {chart_type}")
+    
+    # Create plots for all vector files in the experiment
+    create_plots_for_experiment(
+        experiment_folder_path, 
+        metadata_file_path, 
+        run_id, 
+        vector_output_folder_path, 
+        mode=mode,
+        chart_type=chart_type,
+        use_combined=use_combined
+    )
+    
+    logging.info("END FLOW ******************* Create Enhanced Visualization Plots *******************")
+
+# ===============================
+# MAIN ENTRY POINT
+# ===============================
+
+if __name__ == "__main__":
+    # Setup environment
+    dotenv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '.env'))
+    config = dotenv_values(dotenv_path)
+
+    # Configure logging
+    logs_dir = "logs"
+    os.makedirs(logs_dir, exist_ok=True)
+    logging.basicConfig(
+        filename=os.path.join(logs_dir, 'model_viz_enhanced.log'),
+        level=logging.INFO,
+        format='%(asctime)s - %(levelname)s - %(message)s',
+        filemode='a'
+    )
+    
+    # Setup argument parser
+    parser = argparse.ArgumentParser(
+        description='Create enhanced visualization plots from experiment results'
+    )
+    parser.add_argument('timestamp', help='Run timestamp')
+    parser.add_argument('dataset_name', help='Input protein dataset name')
+    parser.add_argument('filter', help='MR Filter')
+    parser.add_argument('partition_rule', help='MR partition rule')
+    parser.add_argument('experiment_name', help='Experiment folder name (without .json extension)')
+    parser.add_argument('--control', action='store_true',
+                       help='Use combined dataset (original + control) for visualization')
+    parser.add_argument('--mode', choices=['single', 'grid'], default='single',
+                       help='Visualization mode: single (individual plots) or grid (combined grid)')
+    parser.add_argument('--chart-type', choices=['name', 'type'], default='name',
+                       help='Chart type: name (family_name) or type (family_type)')
+    
+    # Parse arguments
+    args = parser.parse_args()
+
+    # Input parameters
+    input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
+    
+    # Set run data to work on
+    family_dataset_name = getattr(dataset_names, args.dataset_name)
+    timestamp = args.timestamp
+    filter_name = getattr(filters, args.filter).name
+    partition_rule_name = getattr(partition_rules, args.partition_rule)["name"]
+    experiment_name = args.experiment_name
+    
+    # Create enhanced visualization plots
+    create_visualization_plots(
+        input_data_root_path, 
+        family_dataset_name, 
+        timestamp, 
+        filter_name, 
+        partition_rule_name, 
+        experiment_name, 
+        mode=args.mode,
+        chart_type=args.chart_type,
+        use_combined=args.control
+    ) 
