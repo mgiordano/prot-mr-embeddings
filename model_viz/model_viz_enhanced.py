@@ -178,8 +178,7 @@ def save_figure(fig, filename, format='png', **kwargs):
         'dpi': 300,
         'bbox_inches': 'tight',
         'facecolor': 'white',
-        'edgecolor': 'none',
-        'pad_inches': 0.1
+        'edgecolor': 'none'
     }
     default_kwargs.update(kwargs)
     
@@ -482,7 +481,7 @@ def optimize_legend_columns(num_labels, fig_height):
 # ===============================
 
 def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=0.1, alpha=0.5, 
-                                xlim=None, ylim=None, show_params=True):
+                                xlim=None, ylim=None, show_params=False, legend_title=None):
     """
     Create an enhanced scatter plot with consistent styling and improved legends.
     
@@ -502,9 +501,12 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
     # Setup thesis style
     setup_thesis_style()
     
-    # Create figure with appropriate size
+    # Create figure with appropriate size - use square aspect ratio to prevent distortion
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111)
+    
+    # Set equal aspect ratio to prevent distortion, but allow flexibility for layout
+    ax.set_aspect('equal')
     
     # Get unique labels and sort alphabetically
     unique_labels = sorted(df[label_column].unique())
@@ -546,7 +548,7 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
                            loc='upper left',
                            borderaxespad=0.,
                            ncol=n_cols,
-                           title=label_column.replace('_', ' ').title())
+                           title=legend_title)
     
     # Add experiment parameters legend if requested and output_file is provided
     if show_params and output_file:
@@ -567,14 +569,23 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
     
     # Format axes with thesis styling
     format_axes(ax, 
-                xlabel="Dimension 1", 
-                ylabel="Dimension 2")
+                xlabel="Dim 1", 
+                ylabel="Dim 2")
     
     # Set axis limits if provided
     if xlim:
         ax.set_xlim(xlim[0], xlim[1])
     if ylim:
         ax.set_ylim(ylim[0], ylim[1])
+    else:
+        # Ensure axis limits are symmetric for consistent scaling
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        max_range = max(x_max - x_min, y_max - y_min) / 2
+        x_mid = (x_min + x_max) / 2
+        y_mid = (y_min + y_max) / 2
+        ax.set_xlim(x_mid - max_range, x_mid + max_range)
+        ax.set_ylim(y_mid - max_range, y_mid + max_range)
     
     # Adjust layout to prevent legend cutoff
     plt.tight_layout()
@@ -607,13 +618,14 @@ def create_grid_visualization(vector_files, metadata_file_path, label_column,
     
 
     
-    # Create figure with appropriate size
-    fig_width = 6 * n_cols
-    fig_height = 5 * n_rows
+    # Create figure with appropriate size - more compact to reduce white space
+    fig_width = 5 * n_cols  # Reduced from 6 to 5 for less white space
+    fig_height = 5 * n_rows  # Reduced from 5 to 4 for less white space
     # Add extra height for the legend at the bottom - estimate based on file count
     # We'll adjust based on actual label count later
     legend_height = 1.5
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height + legend_height))
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height + legend_height), 
+                           constrained_layout=False)  # Use constrained_layout for better spacing
     
     # Handle different subplot array cases
     if n_files == 1:
@@ -714,6 +726,9 @@ def create_grid_visualization(vector_files, metadata_file_path, label_column,
             ax.set_title(f"Error: {os.path.basename(vector_file)}")
             continue
         
+        # Set equal aspect ratio to match single mode
+        ax.set_aspect('equal')
+        
         # Create scatter plot with consistent colors
         for label in unique_labels:
             if label in merged_df[label_column].values:
@@ -739,6 +754,15 @@ def create_grid_visualization(vector_files, metadata_file_path, label_column,
             ax.set_xlabel("Dim 1")
         if col == 0:
             ax.set_ylabel("Dim 2")
+            
+        # Ensure axis limits are symmetric for consistent scaling
+        x_min, x_max = ax.get_xlim()
+        y_min, y_max = ax.get_ylim()
+        max_range = max(x_max - x_min, y_max - y_min) / 2
+        x_mid = (x_min + x_max) / 2
+        y_mid = (y_min + y_max) / 2
+        ax.set_xlim(x_mid - max_range, x_mid + max_range)
+        ax.set_ylim(y_mid - max_range, y_mid + max_range)
         
         # Remove individual legends for subplots
         ax.legend().set_visible(False)
@@ -778,24 +802,25 @@ def create_grid_visualization(vector_files, metadata_file_path, label_column,
     
     fig.legend(handles=legend_elements, 
               loc='upper center',
-              bbox_to_anchor=(0.5, 0.15),  # Position just below the figure
+              bbox_to_anchor=(0.5, 0.15),  # Position just below the figure, adjusted for better centering
               bbox_transform=fig.transFigure,
               title=legend_title,
               ncol=n_cols,
               columnspacing=0.8,  # Reduce space between columns
-              handletextpad=0.4)  # Reduce space between handle and text
+              handletextpad=0.4,  # Reduce space between handle and text
+              frameon=True,       # Add frame for better visibility
+              borderaxespad=0.5)
     
     # Remove overall title as requested
     
-    # Adjust layout for bottom legend
-    plt.tight_layout()
-    # Calculate bottom margin based on number of unique labels and add more vertical space between rows
+    # With constrained_layout=True, we don't need tight_layout()
+    # Just adjust bottom margin for legend
     label_count = len(unique_labels)
     # Estimate legend height based on number of rows it will take
     legend_rows = math.ceil(label_count / max_cols_per_row)
     # Reserve space for legend: base margin + space for legend rows
     bottom_margin = 0.05 + (legend_rows * 0.03)  # More precise calculation
-    plt.subplots_adjust(bottom=bottom_margin, hspace=0.4)  # Add vertical space between rows
+    plt.subplots_adjust(bottom=bottom_margin, hspace=0.3, wspace=0.3)  # Adjusted spacing between subplots
     
     return fig, axes
 
@@ -917,7 +942,8 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
                         label_column, 
                         output_file=plot_output_path, 
                         point_size=0.1, 
-                        alpha=0.2
+                        alpha=0.2,
+                        legend_title="Familias de proteínas"
                     )
                     
                     # Save the plot
