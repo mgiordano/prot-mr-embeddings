@@ -7,6 +7,8 @@ import pandas as pd
 import numpy as np
 from dotenv import dotenv_values
 from sklearn.neighbors import NearestNeighbors
+from scipy.stats import spearmanr
+from scipy.spatial.distance import pdist, squareform
 import time
 
 from utils.utils import dataset_names, filters, partition_rules
@@ -120,6 +122,43 @@ def calculate_knn_preservation(high_dim_neighbors, low_dim_data, k=10):
     
     return knn_preservation
 
+def calculate_cpd(high_dim_distances, low_dim_data, sample_indices):
+    """
+    Calculate Correlation of Pairwise Distances (CPD) metric using pre-computed high-dimensional distances
+    
+    This metric evaluates how well the global structure is preserved.
+    It compares pairwise distances in high-dimensional space with those in 
+    the t-SNE embedding using Spearman correlation.
+    
+    Args:
+        high_dim_distances: pre-computed pairwise distances from high-dimensional space
+        low_dim_data: numpy array of shape (n_samples, 2) - t-SNE embedding
+        sample_indices: indices of the sampled points
+    
+    Returns:
+        float: Spearman correlation coefficient (-1 to 1, higher is better)
+    """
+    logging.info("START TASK - calculate_cpd")
+    start_time = time.time()
+    
+    # Create subsampled low-dimensional data
+    low_dim_sample = low_dim_data[sample_indices]
+    
+    logging.info(f"Computing low-dimensional pairwise distances for {len(sample_indices)} sampled points")
+    
+    # Calculate pairwise distances for low-dimensional data only
+    # (high-dimensional distances are pre-computed)
+    low_dim_distances = pdist(low_dim_sample, metric='euclidean')
+    
+    # Calculate Spearman correlation between distance arrays
+    logging.info("Computing Spearman correlation")
+    correlation, p_value = spearmanr(high_dim_distances, low_dim_distances)
+    
+    elapsed_time = time.time() - start_time
+    logging.info(f"END TASK - calculate_cpd: {correlation:.4f} (p-value: {p_value:.6f}, computed in {elapsed_time:.2f}s)")
+    
+    return correlation
+
 def load_vector_data(vector_file_path):
     """Load vector data from TSV file"""
     logging.info(f"Loading vector data from: {vector_file_path}")
@@ -184,6 +223,20 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
     logging.info("Computing high-dimensional neighbors once for all experiments")
     high_dim_neighbors = find_k_nearest_neighbors(high_dim_data, k=10)
     
+    # Calculate sampling and high-dimensional distances ONCE for CPD metric (optimization)
+    num_points = high_dim_data.shape[0]
+    sample_size = min(1000, num_points)  # Use smaller sample if dataset is small
+    if sample_size < 1000:
+        logging.warning(f"Dataset has only {num_points} points, using sample_size={sample_size}")
+    
+    # Set random seed for reproducible sampling across all experiments
+    np.random.seed(42)
+    sample_indices = np.random.choice(num_points, size=sample_size, replace=False)
+    
+    logging.info(f"Computing high-dimensional pairwise distances once for {sample_size} sampled points")
+    high_dim_sample = high_dim_data[sample_indices]
+    high_dim_distances = pdist(high_dim_sample, metric='euclidean')
+    
     results = []
     
     for tsne_file in tsne_files:
@@ -204,6 +257,9 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
             # Calculate KNN preservation metric (using pre-computed high-dim neighbors)
             knn_preservation = calculate_knn_preservation(high_dim_neighbors, low_dim_data, k=10)
             
+            # Calculate CPD metric (global structure preservation) using pre-computed distances
+            cpd_correlation = calculate_cpd(high_dim_distances, low_dim_data, sample_indices)
+            
             # Create result row
             result_row = {
                 'filename': os.path.basename(tsne_file),
@@ -218,6 +274,7 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
                 'max_iterations': int(params['max_iterations']),
                 'random_state': int(params['random_state']),
                 'knn_preservation_k10': knn_preservation,
+                'cpd_correlation': cpd_correlation,
                 'num_points': high_dim_data.shape[0],
                 'high_dim_features': high_dim_data.shape[1],
                 'low_dim_features': low_dim_data.shape[1]
@@ -269,6 +326,13 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, use_combined=F
         knn_min = metrics_df['knn_preservation_k10'].min()
         knn_max = metrics_df['knn_preservation_k10'].max()
         logging.info(f"KNN Preservation (k=10) - Mean: {knn_mean:.4f}, Std: {knn_std:.4f}, Min: {knn_min:.4f}, Max: {knn_max:.4f}")
+    
+    if 'cpd_correlation' in metrics_df.columns:
+        cpd_mean = metrics_df['cpd_correlation'].mean()
+        cpd_std = metrics_df['cpd_correlation'].std()
+        cpd_min = metrics_df['cpd_correlation'].min()
+        cpd_max = metrics_df['cpd_correlation'].max()
+        logging.info(f"CPD Correlation - Mean: {cpd_mean:.4f}, Std: {cpd_std:.4f}, Min: {cpd_min:.4f}, Max: {cpd_max:.4f}")
     
     logging.info("END TASK - create_metrics_for_experiment")
 
