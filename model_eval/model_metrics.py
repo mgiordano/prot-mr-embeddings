@@ -10,6 +10,8 @@ from sklearn.neighbors import NearestNeighbors
 from scipy.stats import spearmanr
 from scipy.spatial.distance import pdist, squareform
 from sklearn.metrics import silhouette_samples
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
 import time
 
 from utils.utils import dataset_names, filters, partition_rules
@@ -387,6 +389,94 @@ def analyze_cluster_metrics(experiment_folder_path, run_id, metadata_file_path, 
     logging.info("END TASK - analyze_cluster_metrics")
     return results_df
 
+def calculate_scree_data(high_dim_data):
+    """
+    Calculate explained variance for each PCA component (scree plot data)
+    
+    Args:
+        high_dim_data: numpy array of shape (n_samples, n_features)
+    
+    Returns:
+        list: List of dictionaries with component analysis data
+    """
+    logging.info("START TASK - calculate_scree_data")
+    start_time = time.time()
+    
+    # Step 1: Standardize the data (center to mean 0, scale to unit variance)
+    logging.info("Standardizing high-dimensional data")
+    scaler = StandardScaler()
+    standardized_data = scaler.fit_transform(high_dim_data)
+    
+    # Step 2: Perform PCA to get the explained variance for each component
+    logging.info(f"Performing PCA on {high_dim_data.shape[0]} samples with {high_dim_data.shape[1]} features")
+    pca = PCA()
+    pca.fit(standardized_data)
+    
+    # Get explained variance for each component
+    explained_variances = pca.explained_variance_
+    
+    # Step 3: Calculate total variance to find percentages
+    total_variance = np.sum(explained_variances)
+    
+    # Step 4: Store the output data in a structured format
+    logging.info("Computing component statistics")
+    scree_data_table = []
+    cumulative_variance = 0
+    
+    for i in range(len(explained_variances)):
+        variance = explained_variances[i]
+        percentage_variance = (variance / total_variance) * 100
+        cumulative_variance += percentage_variance
+        
+        record = {
+            "component_number": i + 1,
+            "explained_variance": variance,
+            "percentage_variance": percentage_variance,
+            "cumulative_percentage_variance": cumulative_variance
+        }
+        scree_data_table.append(record)
+    
+    elapsed_time = time.time() - start_time
+    logging.info(f"END TASK - calculate_scree_data: computed {len(explained_variances)} components in {elapsed_time:.2f}s")
+    
+    return scree_data_table
+
+def analyze_scree_data(vector_output_folder_path, run_id, use_combined=False):
+    """
+    Analyze PCA explained variance for the high-dimensional bio vectors
+    """
+    logging.info("START TASK - analyze_scree_data")
+    
+    # Determine input filename based on combined flag
+    if use_combined:
+        vectors_input_filename = run_id + "-combined-vectors_bio.tsv"
+    else:
+        vectors_input_filename = run_id + "-vectors_bio.tsv"
+    
+    vectors_path = os.path.join(vector_output_folder_path, vectors_input_filename)
+    
+    # Check if the input file exists
+    if not os.path.exists(vectors_path):
+        if use_combined:
+            raise FileNotFoundError(f"Combined bio vectors file not found: {vectors_path}. Please run model_combine_datasets.py first.")
+        else:
+            raise FileNotFoundError(f"Bio vectors file not found: {vectors_path}")
+    
+    logging.info(f"Loading bio vectors from: {vectors_path}")
+    
+    # Load high-dimensional bio vectors
+    bio_vectors = np.loadtxt(vectors_path, delimiter='\t', dtype=np.float32)
+    logging.info(f"Loaded bio vectors with shape: {bio_vectors.shape}")
+    
+    # Calculate scree data
+    scree_data = calculate_scree_data(bio_vectors)
+    
+    # Convert to DataFrame
+    scree_df = pd.DataFrame(scree_data)
+    
+    logging.info("END TASK - analyze_scree_data")
+    return scree_df
+
 def load_vector_data(vector_file_path):
     """Load vector data from TSV file"""
     logging.info(f"Loading vector data from: {vector_file_path}")
@@ -669,6 +759,40 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_
             
     except Exception as e:
         logging.error(f"Error during cluster analysis: {str(e)}")
+    
+    # Analyze scree plot data (PCA explained variance) and save to separate CSV
+    logging.info("Starting scree plot analysis (PCA explained variance)")
+    
+    try:
+        # Get the vector output folder path to access the bio vectors file
+        date = utils.get_date_from_formatted_ts(run_id.split('-')[0])  # Extract timestamp from run_id
+        family_dataset_name = run_id.split('-')[1]  # Extract dataset name from run_id
+        vector_output_folder_path = os.path.join(os.path.dirname(experiment_folder_path).replace('/experiments', ''))
+        
+        scree_df = analyze_scree_data(vector_output_folder_path, run_id, use_combined)
+        
+        if not scree_df.empty:
+            scree_filename = "scree_data_table.csv"
+            scree_output_path = os.path.join(metrics_folder, scree_filename)
+            scree_df.to_csv(scree_output_path, index=False)
+            logging.info(f"Scree data saved to: {scree_output_path}")
+            
+            # Log some key statistics
+            total_components = len(scree_df)
+            variance_90_components = len(scree_df[scree_df['cumulative_percentage_variance'] <= 90.0])
+            variance_95_components = len(scree_df[scree_df['cumulative_percentage_variance'] <= 95.0])
+            variance_99_components = len(scree_df[scree_df['cumulative_percentage_variance'] <= 99.0])
+            
+            logging.info(f"PCA Analysis Summary:")
+            logging.info(f"Total components: {total_components}")
+            logging.info(f"Components for 90% variance: {variance_90_components}")
+            logging.info(f"Components for 95% variance: {variance_95_components}")
+            logging.info(f"Components for 99% variance: {variance_99_components}")
+        else:
+            logging.warning("No scree data computed")
+            
+    except Exception as e:
+        logging.error(f"Error during scree analysis: {str(e)}")
     
     # Log summary statistics
     logging.info(f"Computed metrics for {len(metrics_df)} t-SNE configurations")
