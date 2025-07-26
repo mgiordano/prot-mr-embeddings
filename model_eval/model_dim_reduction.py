@@ -26,6 +26,7 @@ def map_tsne_parameters(tsne_parameters, implementation, iteration_index):
     perplexity = get_param_value(tsne_parameters["perplexity"], iteration_index)
     learning_rate = get_param_value(tsne_parameters["learning_rate"], iteration_index)
     max_iter = get_param_value(tsne_parameters["max_iter"], iteration_index)
+    method = get_param_value(tsne_parameters["method"], iteration_index)
     exaggeration = get_param_value(tsne_parameters["exaggeration"], iteration_index)
     
     # Handle optional n_jobs parameter - default to max CPU count if not specified
@@ -34,8 +35,6 @@ def map_tsne_parameters(tsne_parameters, implementation, iteration_index):
     else:
         n_jobs = os.cpu_count()  # Use all available CPUs
         logging.info(f"n_jobs not specified in parameters, defaulting to max CPU count: {n_jobs}")
-    
-    method = get_param_value(tsne_parameters["method"], iteration_index)
     
     params = {
         "n_components": n_components,

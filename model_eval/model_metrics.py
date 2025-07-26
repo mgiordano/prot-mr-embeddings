@@ -9,6 +9,7 @@ from dotenv import dotenv_values
 from sklearn.neighbors import NearestNeighbors
 from scipy.stats import spearmanr
 from scipy.spatial.distance import pdist, squareform
+from sklearn.metrics import silhouette_samples
 import time
 
 from utils.utils import dataset_names, filters, partition_rules
@@ -242,6 +243,149 @@ def calculate_knc_preservation(high_dim_class_neighbors, low_dim_data, class_lab
     logging.info(f"END TASK - calculate_knc_preservation: {knc_preservation:.4f} (computed in {elapsed_time:.2f}s)")
     
     return knc_preservation
+
+def calculate_class_silhouette_scores(data, class_labels):
+    """
+    Calculate normalized silhouette scores for each class using sklearn's efficient implementation
+    
+    Args:
+        data: numpy array of shape (n_samples, n_features)
+        class_labels: array-like of class labels for each sample
+    
+    Returns:
+        dict: class_name -> normalized silhouette score (0 to 1, higher is better)
+    """
+    logging.info("START TASK - calculate_class_silhouette_scores")
+    start_time = time.time()
+    
+    # Use sklearn's efficient silhouette implementation
+    silhouette_scores = silhouette_samples(data, class_labels, metric='euclidean')
+    
+    # Calculate average silhouette score for each class
+    unique_classes = np.unique(class_labels)
+    class_scores = {}
+    
+    for class_name in unique_classes:
+        class_mask = class_labels == class_name
+        class_silhouette_scores = silhouette_scores[class_mask]
+        avg_silhouette = np.mean(class_silhouette_scores)
+        
+        # Normalize from [-1, 1] to [0, 1]
+        normalized_score = (avg_silhouette + 1) / 2
+        class_scores[class_name] = normalized_score
+    
+    elapsed_time = time.time() - start_time
+    logging.info(f"END TASK - calculate_class_silhouette_scores: computed for {len(unique_classes)} classes in {elapsed_time:.2f}s")
+    
+    return class_scores
+
+def centroids_to_string_array(centroids):
+    """
+    Convert centroid coordinates to string representation for CSV storage
+    
+    Args:
+        centroids: numpy array of shape (n_classes, n_features)
+    
+    Returns:
+        dict: class_index -> string representation of centroid
+    """
+    centroid_strings = {}
+    for i, centroid in enumerate(centroids):
+        # Convert to string with reasonable precision
+        centroid_str = '[' + ','.join([f'{x:.6f}' for x in centroid]) + ']'
+        centroid_strings[i] = centroid_str
+    
+    return centroid_strings
+
+def analyze_cluster_metrics(experiment_folder_path, run_id, metadata_file_path, class_label_column, 
+                          high_dim_data, class_labels, unique_classes, high_dim_centroids, use_combined=False):
+    """
+    Analyze cluster-level metrics for all t-SNE files in the experiment folder
+    """
+    logging.info("START TASK - analyze_cluster_metrics")
+    
+    # Find all t-SNE TSV files in experiment folder
+    tsv_pattern = os.path.join(experiment_folder_path, "*.tsv")
+    tsv_files = glob.glob(tsv_pattern)
+    
+    # Filter to get only t-SNE vector files
+    tsne_files = [f for f in tsv_files if 'vectors_tsne' in os.path.basename(f)]
+    
+    if not tsne_files:
+        logging.warning(f"No t-SNE vector files found in {experiment_folder_path}")
+        return pd.DataFrame()
+    
+    logging.info(f"Found {len(tsne_files)} t-SNE vector files for cluster analysis")
+    
+    # Calculate high-dimensional silhouette scores ONCE (optimization)
+    logging.info("Computing high-dimensional silhouette scores once for all experiments")
+    high_dim_silhouette_scores = calculate_class_silhouette_scores(high_dim_data, class_labels)
+    
+    # Convert high-dimensional centroids to string format ONCE (optimization)
+    high_dim_centroid_strings = centroids_to_string_array(high_dim_centroids)
+    
+    results = []
+    
+    for tsne_file in tsne_files:
+        logging.info(f"Processing cluster metrics for t-SNE file: {os.path.basename(tsne_file)}")
+        
+        try:
+            # Parse parameters from filename
+            params = parse_filename_parameters(tsne_file)
+            
+            # Load t-SNE vectors (2D)
+            low_dim_data = load_vector_data(tsne_file)
+            
+            # Check data consistency
+            if high_dim_data.shape[0] != low_dim_data.shape[0]:
+                logging.error(f"Dimension mismatch: high_dim={high_dim_data.shape[0]}, low_dim={low_dim_data.shape[0]}")
+                continue
+            
+            # Calculate low-dimensional silhouette scores
+            low_dim_silhouette_scores = calculate_class_silhouette_scores(low_dim_data, class_labels)
+            
+            # Calculate low-dimensional centroids
+            low_dim_centroids = calculate_class_centroids(low_dim_data, class_labels, unique_classes)
+            low_dim_centroid_strings = centroids_to_string_array(low_dim_centroids)
+            
+            # Create results for each class
+            for i, class_name in enumerate(unique_classes):
+                result_row = {
+                    'filename': os.path.basename(tsne_file),
+                    'timestamp': params['timestamp'],
+                    'dataset': params['dataset'],
+                    'filter': params['filter'],
+                    'partition': params['partition'],
+                    'vectors_method': params['vectors_method'],
+                    'method': params['method'],
+                    'perplexity': int(params['perplexity']),
+                    'learning_rate': params['learning_rate'],
+                    'max_iterations': int(params['max_iterations']),
+                    'random_state': int(params['random_state']),
+                    'class_name': class_name,
+                    'high_dim_centroid': high_dim_centroid_strings[i],
+                    'low_dim_centroid': low_dim_centroid_strings[i],
+                    'high_dim_silhouette': high_dim_silhouette_scores[class_name],
+                    'low_dim_silhouette': low_dim_silhouette_scores[class_name],
+                    'silhouette_preservation': low_dim_silhouette_scores[class_name] / high_dim_silhouette_scores[class_name] if high_dim_silhouette_scores[class_name] > 0 else np.nan,
+                    'num_class_points': np.sum(class_labels == class_name)
+                }
+                
+                results.append(result_row)
+                
+        except Exception as e:
+            logging.error(f"Error processing cluster metrics for {tsne_file}: {str(e)}")
+            continue
+    
+    # Convert to DataFrame
+    results_df = pd.DataFrame(results)
+    
+    if not results_df.empty:
+        # Sort by class name and experiment parameters for better organization
+        results_df = results_df.sort_values(['class_name', 'perplexity', 'learning_rate', 'max_iterations'])
+    
+    logging.info("END TASK - analyze_cluster_metrics")
+    return results_df
 
 def load_vector_data(vector_file_path):
     """Load vector data from TSV file"""
@@ -492,6 +636,39 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_
     
     metrics_df.to_csv(metrics_output_path, index=False)
     logging.info(f"Metrics saved to: {metrics_output_path}")
+    
+    # Analyze cluster-level metrics and save to separate CSV
+    logging.info("Starting cluster-level silhouette analysis")
+    
+    # Load the data we need for cluster analysis (reuse computed data from analyze_tsne_metrics)
+    # We need to reload some data since it's not passed back from analyze_tsne_metrics
+    try:
+        high_dim_data = load_high_dim_data(experiment_folder_path, run_id, use_combined)
+        metadata_df = load_metadata(metadata_file_path)
+        class_labels = metadata_df[class_label_column].values
+        unique_classes = np.unique(class_labels)
+        
+        if len(unique_classes) > 1:
+            high_dim_centroids = calculate_class_centroids(high_dim_data, class_labels, unique_classes)
+            
+            cluster_df = analyze_cluster_metrics(
+                experiment_folder_path, run_id, metadata_file_path, class_label_column,
+                high_dim_data, class_labels, unique_classes, high_dim_centroids, use_combined
+            )
+            
+            if not cluster_df.empty:
+                cluster_filename = "cluster_metrics.csv"
+                cluster_output_path = os.path.join(metrics_folder, cluster_filename)
+                cluster_df.to_csv(cluster_output_path, index=False)
+                logging.info(f"Cluster metrics saved to: {cluster_output_path}")
+                logging.info(f"Computed cluster metrics for {len(unique_classes)} classes across {len(cluster_df) // len(unique_classes)} t-SNE configurations")
+            else:
+                logging.warning("No cluster metrics computed")
+        else:
+            logging.warning("Skipping cluster analysis - need at least 2 classes")
+            
+    except Exception as e:
+        logging.error(f"Error during cluster analysis: {str(e)}")
     
     # Log summary statistics
     logging.info(f"Computed metrics for {len(metrics_df)} t-SNE configurations")
