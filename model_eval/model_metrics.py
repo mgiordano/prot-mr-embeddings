@@ -159,12 +159,104 @@ def calculate_cpd(high_dim_distances, low_dim_data, sample_indices):
     
     return correlation
 
+def calculate_class_centroids(data, class_labels, unique_classes):
+    """
+    Calculate centroid (mean position) for each class
+    
+    Args:
+        data: numpy array of shape (n_samples, n_features)
+        class_labels: array-like of class labels for each sample
+        unique_classes: list of unique class names
+    
+    Returns:
+        numpy array of shape (n_classes, n_features) with class centroids
+    """
+    centroids = []
+    for class_name in unique_classes:
+        class_mask = class_labels == class_name
+        class_data = data[class_mask]
+        centroid = np.mean(class_data, axis=0)
+        centroids.append(centroid)
+    
+    return np.array(centroids)
+
+def calculate_knc_preservation(high_dim_class_neighbors, low_dim_data, class_labels, unique_classes, k=10):
+    """
+    Calculate K-Nearest Classes (KNC) preservation metric using pre-computed high-dimensional class neighbors
+    
+    This metric evaluates how well the mesoscopic (class-level) structure is preserved.
+    It compares the k nearest class centroids in high-dimensional space with those 
+    in the t-SNE embedding.
+    
+    Args:
+        high_dim_class_neighbors: pre-computed neighbor indices for high-dimensional class centroids
+        low_dim_data: numpy array of shape (n_samples, 2) - t-SNE embedding
+        class_labels: array-like of class labels for each sample
+        unique_classes: array of unique class names
+        k: number of nearest class centroids to consider (default=10)
+    
+    Returns:
+        float: KNC preservation score (0 to 1, higher is better)
+    """
+    logging.info(f"START TASK - calculate_knc_preservation with k={k}")
+    start_time = time.time()
+    
+    num_classes = len(unique_classes)
+    
+    if k >= num_classes:
+        logging.warning(f"k={k} is >= number of classes ({num_classes}). Setting k to {num_classes-1}")
+        k = num_classes - 1
+    
+    if k <= 0:
+        logging.warning(f"Not enough classes for KNC analysis (need at least 2 classes, found {num_classes})")
+        return np.nan
+    
+    # Calculate class centroids in low-dimensional space only (high-dim already computed)
+    logging.info("Computing class centroids in low-dimensional space")
+    low_dim_centroids = calculate_class_centroids(low_dim_data, class_labels, unique_classes)
+    
+    # Find k nearest centroids for each class in low-dimensional space
+    logging.info("Finding nearest class centroids in low-dimensional space")
+    low_dim_class_neighbors = find_k_nearest_neighbors(low_dim_centroids, k)
+    
+    # Calculate preservation for each class
+    logging.info("Calculating class neighborhood preservation")
+    total_preservation = 0
+    
+    for i in range(num_classes):
+        # Get neighbor sets for class i
+        high_neighbors_set = set(high_dim_class_neighbors[i])
+        low_neighbors_set = set(low_dim_class_neighbors[i])
+        
+        # Find intersection
+        preserved_neighbors = high_neighbors_set.intersection(low_neighbors_set)
+        num_preserved = len(preserved_neighbors)
+        
+        # Add fraction of preserved neighbors
+        total_preservation += num_preserved / k
+    
+    # Calculate average preservation across all classes
+    knc_preservation = total_preservation / num_classes
+    
+    elapsed_time = time.time() - start_time
+    logging.info(f"END TASK - calculate_knc_preservation: {knc_preservation:.4f} (computed in {elapsed_time:.2f}s)")
+    
+    return knc_preservation
+
 def load_vector_data(vector_file_path):
     """Load vector data from TSV file"""
     logging.info(f"Loading vector data from: {vector_file_path}")
     vectors = np.loadtxt(vector_file_path, delimiter='\t', dtype=np.float32)
     logging.info(f"Loaded vectors with shape: {vectors.shape}")
     return vectors
+
+def load_metadata(metadata_file_path):
+    """Load metadata from TSV file"""
+    logging.info(f"Loading metadata from: {metadata_file_path}")
+    metadata_df = pd.read_csv(metadata_file_path, sep='\t')
+    logging.info(f"Loaded metadata with shape: {metadata_df.shape}")
+    logging.info(f"Metadata columns: {list(metadata_df.columns)}")
+    return metadata_df
 
 def load_high_dim_data(experiment_folder_path, run_id, use_combined=False):
     """
@@ -193,7 +285,7 @@ def load_high_dim_data(experiment_folder_path, run_id, use_combined=False):
     
     return load_vector_data(high_dim_path)
 
-def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
+def analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False):
     """
     Analyze metrics for all t-SNE files in the experiment folder
     """
@@ -219,6 +311,18 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
         logging.error(f"Could not load high-dimensional data: {str(e)}")
         return pd.DataFrame()
     
+    # Load metadata once (it's the same for all t-SNE runs)
+    try:
+        metadata_df = load_metadata(metadata_file_path)
+        if class_label_column not in metadata_df.columns:
+            logging.error(f"Class label column '{class_label_column}' not found in metadata. Available columns: {list(metadata_df.columns)}")
+            return pd.DataFrame()
+        class_labels = metadata_df[class_label_column].values
+        logging.info(f"Using '{class_label_column}' as class labels")
+    except FileNotFoundError as e:
+        logging.error(f"Could not load metadata: {str(e)}")
+        return pd.DataFrame()
+    
     # Calculate high-dimensional neighbors ONCE for all experiments (optimization)
     logging.info("Computing high-dimensional neighbors once for all experiments")
     high_dim_neighbors = find_k_nearest_neighbors(high_dim_data, k=10)
@@ -236,6 +340,26 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
     logging.info(f"Computing high-dimensional pairwise distances once for {sample_size} sampled points")
     high_dim_sample = high_dim_data[sample_indices]
     high_dim_distances = pdist(high_dim_sample, metric='euclidean')
+    
+    # Calculate class-related data ONCE for KNC metric (optimization)
+    unique_classes = np.unique(class_labels)
+    num_classes = len(unique_classes)
+    logging.info(f"Found {num_classes} unique classes for KNC analysis")
+    
+    # Compute high-dimensional class centroids and neighbors once
+    if num_classes > 1:  # Only compute if we have multiple classes
+        logging.info("Computing high-dimensional class centroids once for all experiments")
+        high_dim_centroids = calculate_class_centroids(high_dim_data, class_labels, unique_classes)
+        
+        knc_k = min(10, num_classes - 1)  # Adjust k for available classes
+        if knc_k > 0:
+            logging.info("Computing high-dimensional class neighbors once for all experiments")
+            high_dim_class_neighbors = find_k_nearest_neighbors(high_dim_centroids, knc_k)
+        else:
+            high_dim_class_neighbors = None
+    else:
+        high_dim_class_neighbors = None
+        knc_k = 0
     
     results = []
     
@@ -260,6 +384,12 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
             # Calculate CPD metric (global structure preservation) using pre-computed distances
             cpd_correlation = calculate_cpd(high_dim_distances, low_dim_data, sample_indices)
             
+            # Calculate KNC metric (class-level structure preservation) using pre-computed data
+            if high_dim_class_neighbors is not None and knc_k > 0:
+                knc_preservation = calculate_knc_preservation(high_dim_class_neighbors, low_dim_data, class_labels, unique_classes, k=knc_k)
+            else:
+                knc_preservation = np.nan  # Not enough classes for KNC analysis
+            
             # Create result row
             result_row = {
                 'filename': os.path.basename(tsne_file),
@@ -275,6 +405,7 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
                 'random_state': int(params['random_state']),
                 'knn_preservation_k10': knn_preservation,
                 'cpd_correlation': cpd_correlation,
+                'knc_preservation_k10': knc_preservation,
                 'num_points': high_dim_data.shape[0],
                 'high_dim_features': high_dim_data.shape[1],
                 'low_dim_features': low_dim_data.shape[1]
@@ -296,7 +427,7 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, use_combined=False):
     logging.info("END TASK - analyze_tsne_metrics")
     return results_df
 
-def create_metrics_for_experiment(experiment_folder_path, run_id, use_combined=False):
+def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False):
     """Create metrics analysis for all TSV files in the experiment folder"""
     logging.info("START TASK - create_metrics_for_experiment")
     
@@ -305,13 +436,57 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, use_combined=F
     os.makedirs(metrics_folder, exist_ok=True)
     
     # Analyze t-SNE metrics
-    metrics_df = analyze_tsne_metrics(experiment_folder_path, run_id, use_combined)
+    metrics_df = analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined)
     
     if metrics_df.empty:
         logging.warning("No metrics computed - no valid t-SNE files found")
         return
     
-    # Save metrics to CSV
+    # Calculate and add summary statistics to the CSV BEFORE saving
+    summary_stats = {}
+    
+    # Calculate summary statistics for each metric
+    if 'knn_preservation_k10' in metrics_df.columns:
+        knn_stats = metrics_df['knn_preservation_k10'].describe()
+        summary_stats.update({
+            'knn_mean': knn_stats['mean'],
+            'knn_std': knn_stats['std'],
+            'knn_min': knn_stats['min'],
+            'knn_max': knn_stats['max'],
+            'knn_25th_percentile': knn_stats['25%'],
+            'knn_50th_percentile': knn_stats['50%'],
+            'knn_75th_percentile': knn_stats['75%']
+        })
+    
+    if 'cpd_correlation' in metrics_df.columns:
+        cpd_stats = metrics_df['cpd_correlation'].describe()
+        summary_stats.update({
+            'cpd_mean': cpd_stats['mean'],
+            'cpd_std': cpd_stats['std'],
+            'cpd_min': cpd_stats['min'],
+            'cpd_max': cpd_stats['max'],
+            'cpd_25th_percentile': cpd_stats['25%'],
+            'cpd_50th_percentile': cpd_stats['50%'],
+            'cpd_75th_percentile': cpd_stats['75%']
+        })
+    
+    if 'knc_preservation_k10' in metrics_df.columns:
+        knc_stats = metrics_df['knc_preservation_k10'].describe()
+        summary_stats.update({
+            'knc_mean': knc_stats['mean'],
+            'knc_std': knc_stats['std'],
+            'knc_min': knc_stats['min'],
+            'knc_max': knc_stats['max'],
+            'knc_25th_percentile': knc_stats['25%'],
+            'knc_50th_percentile': knc_stats['50%'],
+            'knc_75th_percentile': knc_stats['75%']
+        })
+    
+    # Add summary statistics as new columns to each row
+    for col, value in summary_stats.items():
+        metrics_df[col] = value
+    
+    # Save metrics to CSV (now includes summary statistics)
     metrics_filename = "tsne_metrics.csv"
     metrics_output_path = os.path.join(metrics_folder, metrics_filename)
     
@@ -321,22 +496,17 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, use_combined=F
     # Log summary statistics
     logging.info(f"Computed metrics for {len(metrics_df)} t-SNE configurations")
     if 'knn_preservation_k10' in metrics_df.columns:
-        knn_mean = metrics_df['knn_preservation_k10'].mean()
-        knn_std = metrics_df['knn_preservation_k10'].std()
-        knn_min = metrics_df['knn_preservation_k10'].min()
-        knn_max = metrics_df['knn_preservation_k10'].max()
-        logging.info(f"KNN Preservation (k=10) - Mean: {knn_mean:.4f}, Std: {knn_std:.4f}, Min: {knn_min:.4f}, Max: {knn_max:.4f}")
+        logging.info(f"KNN Preservation (k=10) - Mean: {summary_stats.get('knn_mean', 0):.4f}, Std: {summary_stats.get('knn_std', 0):.4f}, Min: {summary_stats.get('knn_min', 0):.4f}, Max: {summary_stats.get('knn_max', 0):.4f}")
     
     if 'cpd_correlation' in metrics_df.columns:
-        cpd_mean = metrics_df['cpd_correlation'].mean()
-        cpd_std = metrics_df['cpd_correlation'].std()
-        cpd_min = metrics_df['cpd_correlation'].min()
-        cpd_max = metrics_df['cpd_correlation'].max()
-        logging.info(f"CPD Correlation - Mean: {cpd_mean:.4f}, Std: {cpd_std:.4f}, Min: {cpd_min:.4f}, Max: {cpd_max:.4f}")
+        logging.info(f"CPD Correlation - Mean: {summary_stats.get('cpd_mean', 0):.4f}, Std: {summary_stats.get('cpd_std', 0):.4f}, Min: {summary_stats.get('cpd_min', 0):.4f}, Max: {summary_stats.get('cpd_max', 0):.4f}")
+    
+    if 'knc_preservation_k10' in metrics_df.columns:
+        logging.info(f"KNC Preservation (k=10) - Mean: {summary_stats.get('knc_mean', 0):.4f}, Std: {summary_stats.get('knc_std', 0):.4f}, Min: {summary_stats.get('knc_min', 0):.4f}, Max: {summary_stats.get('knc_max', 0):.4f}")
     
     logging.info("END TASK - create_metrics_for_experiment")
 
-def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, experiment_name, use_combined=False):
+def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, experiment_name, class_label_column, use_combined=False):
     """Main flow to create metrics analysis for experiment results"""
     logging.info("START FLOW ******************* Create t-SNE Metrics *******************")
     
@@ -344,13 +514,25 @@ def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, fi
     date = utils.get_date_from_formatted_ts(timestamp)
     vector_output_folder_path = os.path.join(input_data_root_path, family_dataset_name, date, "vector_output")
     
-    # Determine run ID
+    # Determine run ID and metadata file path
     run_id = timestamp + "-" + family_dataset_name + "-" + filter_name + "-" + partition_rule_name
     
     if use_combined:
+        run_id_for_metadata = run_id + "-combined"
+        metadata_filename = run_id_for_metadata + "-metadata.tsv"
         experiment_folder_name = experiment_name + "-combined"
     else:
+        metadata_filename = run_id + "-metadata.tsv"
         experiment_folder_name = experiment_name
+    
+    metadata_file_path = os.path.join(vector_output_folder_path, metadata_filename)
+    
+    # Check if metadata file exists
+    if not os.path.exists(metadata_file_path):
+        if use_combined:
+            raise FileNotFoundError(f"Combined metadata file not found: {metadata_file_path}. Please run model_combine_datasets.py first.")
+        else:
+            raise FileNotFoundError(f"Metadata file not found: {metadata_file_path}")
     
     # Locate experiment folder
     experiments_folder_path = os.path.join(vector_output_folder_path, "experiments")
@@ -360,9 +542,11 @@ def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, fi
         raise FileNotFoundError(f"Experiment folder not found: {experiment_folder_path}")
     
     logging.info(f"Processing experiment folder: {experiment_folder_path}")
+    logging.info(f"Using metadata file: {metadata_file_path}")
+    logging.info(f"Using class label column: {class_label_column}")
     
     # Create metrics for all vector files in the experiment
-    create_metrics_for_experiment(experiment_folder_path, run_id, use_combined)
+    create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined)
     
     logging.info("END FLOW ******************* Create t-SNE Metrics *******************")
 
@@ -396,6 +580,8 @@ if __name__ == "__main__":
                         help='MR partition rule')
     parser.add_argument('experiment_name',
                         help='Experiment folder name (without .json extension)')
+    parser.add_argument('class_label_column',
+                        help='Metadata column name to use as class labels (e.g., sequence_family_name, sequence_family_type)')
     parser.add_argument('--control', 
                         action='store_true',
                         help='Use combined dataset (original + control) for metrics analysis')
@@ -412,6 +598,7 @@ if __name__ == "__main__":
     filter_name = getattr(filters, args.filter).name
     partition_rule_name = getattr(partition_rules, args.partition_rule)["name"]
     experiment_name = args.experiment_name
+    class_label_column = args.class_label_column
     
     # Create metrics analysis
     create_tsne_metrics(
@@ -420,6 +607,7 @@ if __name__ == "__main__":
         timestamp, 
         filter_name, 
         partition_rule_name, 
-        experiment_name, 
+        experiment_name,
+        class_label_column,
         args.control
     ) 
