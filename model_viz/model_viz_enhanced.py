@@ -592,6 +592,315 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
     
     return fig, ax
 
+def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
+                                 output_file=None, grid_resolution=50):
+    """
+    Create a single overlap heatmap for one experiment.
+    
+    Args:
+        vector_file (str): Path to vector file
+        metadata_file_path (str): Path to metadata file
+        label_column (str): Column name to use for family identification
+        output_file (str, optional): Path to save the plot
+        grid_resolution (int): Number of grid cells per dimension (default 50 for 50x50 grid)
+        
+    Returns:
+        tuple: (fig, ax) matplotlib objects
+    """
+    # Setup thesis style
+    setup_thesis_style()
+    
+    # Create figure
+    fig, ax = plt.subplots(figsize=(8, 6), constrained_layout=True)
+    
+    # Load metadata
+    metadata_df = pd.read_csv(metadata_file_path, sep='\t')
+    metadata_df.reset_index(inplace=True)
+    metadata_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+    
+    try:
+        # Load vector data
+        vectors_df = pd.read_csv(vector_file, sep='\t', dtype=np.float32)
+        vectors_df.columns = ['reduced_vector_d1', 'reduced_vector_d2']
+        vectors_df.reset_index(inplace=True)
+        vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+        
+        # Merge with metadata
+        merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+        
+        if label_column not in merged_df.columns:
+            ax.text(0.5, 0.5, f'No {label_column} data', transform=ax.transAxes, 
+                   ha='center', va='center', fontsize=12)
+            return fig, ax
+        
+        # Calculate data bounds
+        x_min, x_max = merged_df['reduced_vector_d1'].min(), merged_df['reduced_vector_d1'].max()
+        y_min, y_max = merged_df['reduced_vector_d2'].min(), merged_df['reduced_vector_d2'].max()
+        
+        # Make the grid square by using the maximum range
+        max_range = max(x_max - x_min, y_max - y_min)
+        x_center = (x_min + x_max) / 2
+        y_center = (y_min + y_max) / 2
+        
+        x_min = x_center - max_range / 2
+        x_max = x_center + max_range / 2
+        y_min = y_center - max_range / 2
+        y_max = y_center + max_range / 2
+        
+        # Create grid edges
+        x_edges = np.linspace(x_min, x_max, grid_resolution + 1)
+        y_edges = np.linspace(y_min, y_max, grid_resolution + 1)
+        
+        # Calculate overlap heatmap
+        overlap_grid = np.zeros((grid_resolution, grid_resolution))
+        
+        for grid_row in range(grid_resolution):
+            for grid_col in range(grid_resolution):
+                x_min_cell = x_edges[grid_col]
+                x_max_cell = x_edges[grid_col + 1]
+                y_min_cell = y_edges[grid_row]
+                y_max_cell = y_edges[grid_row + 1]
+                
+                in_cell_mask = (
+                    (merged_df['reduced_vector_d1'] >= x_min_cell) &
+                    (merged_df['reduced_vector_d1'] < x_max_cell) &
+                    (merged_df['reduced_vector_d2'] >= y_min_cell) &
+                    (merged_df['reduced_vector_d2'] < y_max_cell)
+                )
+                
+                cell_data = merged_df[in_cell_mask]
+                
+                if len(cell_data) == 0:
+                    overlap_grid[grid_row, grid_col] = 0
+                else:
+                    unique_families = cell_data[label_column].nunique()
+                    total_points = len(cell_data)
+                    
+                    if unique_families <= 1:
+                        overlap_grid[grid_row, grid_col] = 0
+                    else:
+                        family_counts = cell_data[label_column].value_counts()
+                        family_proportions = family_counts / total_points
+                        entropy = -np.sum(family_proportions * np.log2(family_proportions + 1e-10))
+                        overlap_score = entropy * unique_families * np.log(total_points + 1)
+                        overlap_grid[grid_row, grid_col] = overlap_score
+        
+        # Create heatmap
+        im = ax.imshow(overlap_grid, extent=[x_min, x_max, y_min, y_max],
+                      origin='lower', cmap='viridis', aspect='equal', interpolation='bilinear')
+        
+        # Add colorbar
+        cbar = plt.colorbar(im, ax=ax, shrink=0.8)
+        cbar.set_label('Overlap Score', rotation=270, labelpad=15)
+        
+        # Parse parameters for title
+        params = parse_filename_parameters(vector_file)
+        if params['type'] == 'tsne':
+            title = f"Overlap Analysis - Perplexity = {params['perplexity']}"
+        elif params['type'] == 'umap':
+            title = f"Overlap Analysis - n_neighbors: {params['n_neighbors']}"
+        else:
+            title = f"Overlap Analysis - {os.path.basename(vector_file)}"
+        
+        ax.set_title(title, fontweight='normal')
+        ax.set_xlabel("Dim 1")
+        ax.set_ylabel("Dim 2")
+        
+    except Exception as e:
+        logging.error(f"Error processing {vector_file}: {str(e)}")
+        ax.text(0.5, 0.5, 'Error loading data', transform=ax.transAxes, 
+               ha='center', va='center', fontsize=12)
+        ax.set_title(f"Error: {os.path.basename(vector_file)}")
+    
+    return fig, ax
+
+def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
+                          output_file=None, grid_resolution=50):
+    """
+    Create an overlap heatmap analysis showing family overlap in different experiments.
+    
+    Args:
+        vector_files (list): List of vector file paths
+        metadata_file_path (str): Path to metadata file
+        label_column (str): Column name to use for family identification
+        output_file (str, optional): Path to save the plot
+        grid_resolution (int): Number of grid cells per dimension (default 50 for 50x50 grid)
+        
+    Returns:
+        tuple: (fig, axes) matplotlib objects
+    """
+    # Setup thesis style
+    setup_thesis_style()
+    
+    # Determine grid dimensions
+    n_files = len(vector_files)
+    n_cols = min(3, n_files)  # Maximum 3 columns
+    n_rows = math.ceil(n_files / n_cols)
+    
+    # Create figure with appropriate size
+    fig_width = 5 * n_cols
+    fig_height = 4 * n_rows
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_width, fig_height), 
+                           constrained_layout=True)
+    
+    # Handle different subplot array cases
+    if n_files == 1:
+        axes = [axes]
+    elif n_rows == 1 and n_cols > 1:
+        pass  # axes is already correct as 1D array
+    elif n_cols == 1 and n_rows > 1:
+        pass  # axes is already correct as 1D array
+    
+    # Sort vector files by perplexity parameter for t-SNE or n_neighbors for UMAP
+    def get_sort_key(filename):
+        try:
+            params = parse_filename_parameters(filename)
+            if params['type'] == 'tsne':
+                return int(params['perplexity'])
+            elif params['type'] == 'umap':
+                return int(params['n_neighbors'])
+            else:
+                return 0
+        except:
+            return 0
+    
+    vector_files = sorted(vector_files, key=get_sort_key)
+    
+    # Load metadata once
+    metadata_df = pd.read_csv(metadata_file_path, sep='\t')
+    metadata_df.reset_index(inplace=True)
+    metadata_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+    
+    # Calculate global data bounds for consistent grid across all plots
+    all_data_points = []
+    overlap_grids = []  # Store all grids for global max calculation
+    for vector_file in vector_files:
+        try:
+            vectors_df = pd.read_csv(vector_file, sep='\t', dtype=np.float32)
+            vectors_df.columns = ['reduced_vector_d1', 'reduced_vector_d2']
+            vectors_df.reset_index(inplace=True)
+            vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+            
+            merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+            if label_column in merged_df.columns:
+                all_data_points.extend(merged_df[['reduced_vector_d1', 'reduced_vector_d2']].values)
+        except Exception as e:
+            logging.error(f"Error loading {vector_file}: {str(e)}")
+    
+    if not all_data_points:
+        logging.error("No valid data points found")
+        return fig, axes
+    
+    all_data_points = np.array(all_data_points)
+    global_x_min, global_x_max = np.min(all_data_points[:, 0]), np.max(all_data_points[:, 0])
+    global_y_min, global_y_max = np.min(all_data_points[:, 1]), np.max(all_data_points[:, 1])
+    
+    # Make the grid square by using the maximum range
+    max_range = max(global_x_max - global_x_min, global_y_max - global_y_min)
+    x_center = (global_x_min + global_x_max) / 2
+    y_center = (global_y_min + global_y_max) / 2
+    
+    global_x_min = x_center - max_range / 2
+    global_x_max = x_center + max_range / 2
+    global_y_min = y_center - max_range / 2
+    global_y_max = y_center + max_range / 2
+    
+    # Create grid edges
+    x_edges = np.linspace(global_x_min, global_x_max, grid_resolution + 1)
+    y_edges = np.linspace(global_y_min, global_y_max, grid_resolution + 1)
+    
+    # First pass: calculate all overlap grids and find global max
+    for vector_file in vector_files:
+        try:
+            vectors_df = pd.read_csv(vector_file, sep='\t', dtype=np.float32)
+            vectors_df.columns = ['reduced_vector_d1', 'reduced_vector_d2']
+            vectors_df.reset_index(inplace=True)
+            vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
+            merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+            overlap_grid = np.zeros((grid_resolution, grid_resolution))
+            if label_column in merged_df.columns:
+                for grid_row in range(grid_resolution):
+                    for grid_col in range(grid_resolution):
+                        x_min_cell = x_edges[grid_col]
+                        x_max_cell = x_edges[grid_col + 1]
+                        y_min_cell = y_edges[grid_row]
+                        y_max_cell = y_edges[grid_row + 1]
+                        in_cell_mask = (
+                            (merged_df['reduced_vector_d1'] >= x_min_cell) &
+                            (merged_df['reduced_vector_d1'] < x_max_cell) &
+                            (merged_df['reduced_vector_d2'] >= y_min_cell) &
+                            (merged_df['reduced_vector_d2'] < y_max_cell)
+                        )
+                        cell_data = merged_df[in_cell_mask]
+                        if len(cell_data) == 0:
+                            overlap_grid[grid_row, grid_col] = 0
+                        else:
+                            unique_families = cell_data[label_column].nunique()
+                            total_points = len(cell_data)
+                            if unique_families <= 1:
+                                overlap_grid[grid_row, grid_col] = 0
+                            else:
+                                family_counts = cell_data[label_column].value_counts()
+                                family_proportions = family_counts / total_points
+                                entropy = -np.sum(family_proportions * np.log2(family_proportions + 1e-10))
+                                overlap_score = entropy * unique_families * np.log(total_points + 1)
+                                overlap_grid[grid_row, grid_col] = overlap_score
+            overlap_grids.append(overlap_grid)
+        except Exception as e:
+            logging.error(f"Error loading {vector_file}: {str(e)}")
+            overlap_grids.append(np.zeros((grid_resolution, grid_resolution)))
+    
+    global_max = np.max([np.max(grid) for grid in overlap_grids]) if overlap_grids else 1.0
+    
+    # Second pass: plot all heatmaps with shared color scale
+    for i, (vector_file, overlap_grid) in enumerate(zip(vector_files, overlap_grids)):
+        row = i // n_cols
+        col = i % n_cols
+        if n_files == 1:
+            ax = axes[0] if isinstance(axes, list) else axes
+        elif n_rows == 1 and n_cols > 1:
+            ax = axes[col]
+        elif n_cols == 1 and n_rows > 1:
+            ax = axes[row]
+        else:
+            ax = axes[row, col]
+        im = ax.imshow(overlap_grid, extent=[global_x_min, global_x_max, global_y_min, global_y_max],
+                      origin='lower', cmap='viridis', aspect='equal', interpolation='bilinear', vmin=0, vmax=global_max)
+        params = parse_filename_parameters(vector_file)
+        if params['type'] == 'tsne':
+            subtitle = f"Perplexity = {params['perplexity']}"
+        elif params['type'] == 'umap':
+            subtitle = f"n_neighbors: {params['n_neighbors']}"
+        else:
+            subtitle = os.path.basename(vector_file)
+        ax.set_title(subtitle, fontweight='normal')
+        if row == n_rows - 1:
+            ax.set_xlabel("Dim 1")
+        if col == 0:
+            ax.set_ylabel("Dim 2")
+    
+    # Hide empty subplots
+    total_subplots = n_rows * n_cols
+    for i in range(n_files, total_subplots):
+        row = i // n_cols
+        col = i % n_cols
+        if n_rows == 1 and n_cols > 1:
+            axes[col].set_visible(False)
+        elif n_cols == 1 and n_rows > 1:
+            axes[row].set_visible(False)
+        elif n_rows > 1 and n_cols > 1:
+            axes[row, col].set_visible(False)
+    
+    # Add a single colorbar at the bottom for grid mode
+    if n_files > 1:
+        cbar = fig.colorbar(im, ax=axes.ravel(), orientation='horizontal', fraction=0.05, pad=0.08)
+        cbar.set_label('Overlap Score', fontsize=12)
+    else:
+        cbar = plt.colorbar(im, ax=axes[0] if isinstance(axes, list) else axes, shrink=0.8)
+        cbar.set_label('Overlap Score', rotation=270, labelpad=15)
+    
+    return fig, axes
+
 def create_grid_visualization(vector_files, metadata_file_path, label_column, 
                              output_file=None, point_size=0.1, alpha=0.2, legend_title=None):
     """
@@ -872,7 +1181,7 @@ def load_and_merge_data(vector_file_path, metadata_file_path):
 
 def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_id, 
                                output_folder_path, mode='single', chart_type='name', 
-                               use_combined=False):
+                               use_combined=False, grid_resolution=50):
     """
     Create plots for all TSV files in the experiment folder.
     
@@ -910,11 +1219,76 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
         label_columns = ["sequence_family_name"]
     elif chart_type == 'type':
         label_columns = ["sequence_family_type"]
+    elif chart_type == 'overlap':
+        label_columns = ["sequence_family_name"]  # Use family names for overlap analysis
     else:
         label_columns = ["sequence_family_name", "sequence_family_type"]
     
-    # Process based on mode
-    if mode == 'single':
+    # Process based on mode and chart type
+    if chart_type == 'overlap':
+        if mode == 'single':
+            # Create individual overlap heatmaps for each vector file
+            for vector_file in vector_files:
+                logging.info(f"Processing overlap heatmap for: {os.path.basename(vector_file)}")
+                
+                for label_column in label_columns:
+                    try:
+                        # Generate output filename
+                        base_filename = os.path.splitext(os.path.basename(vector_file))[0]
+                        overlap_filename = f"{base_filename}-overlap-{label_column}.png"
+                        overlap_output_path = os.path.join(charts_folder, overlap_filename)
+                        
+                        logging.info(f"Creating single overlap heatmap for {label_column}: {overlap_filename}")
+                        
+                        # Create single overlap heatmap
+                        fig, ax = create_single_overlap_heatmap(
+                            vector_file,
+                            metadata_file_path,
+                            label_column,
+                            output_file=overlap_output_path,
+                            grid_resolution=grid_resolution
+                        )
+                        
+                        # Save the overlap plot
+                        save_figure(fig, overlap_output_path)
+                        plt.close(fig)
+                        
+                        logging.info(f"Single overlap heatmap saved: {overlap_filename}")
+                        
+                    except Exception as e:
+                        logging.error(f"Error creating single overlap heatmap for {vector_file}: {str(e)}")
+                        continue
+        
+        elif mode == 'grid':
+            # Create grid overlap heatmap for all vector files
+            for label_column in label_columns:
+                logging.info(f"Creating grid overlap heatmap for {label_column}")
+                
+                # Generate output filename for overlap
+                overlap_filename = f"overlap-grid-{label_column}.png"
+                overlap_output_path = os.path.join(charts_folder, overlap_filename)
+                
+                try:
+                    # Create overlap heatmap
+                    fig, axes = create_overlap_heatmap(
+                        vector_files,
+                        metadata_file_path,
+                        label_column,
+                        output_file=overlap_output_path,
+                        grid_resolution=grid_resolution  # Use passed parameter
+                    )
+                    
+                    # Save the overlap plot
+                    save_figure(fig, overlap_output_path)
+                    plt.close(fig)
+                    
+                    logging.info(f"Grid overlap heatmap saved: {overlap_filename}")
+                    
+                except Exception as e:
+                    logging.error(f"Error creating grid overlap heatmap for {label_column}: {str(e)}")
+                    continue
+    
+    elif mode == 'single':
         # Create individual plots for each vector file and label column
         for vector_file in vector_files:
             logging.info(f"Processing vector file: {os.path.basename(vector_file)}")
@@ -989,7 +1363,7 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
 
 def create_visualization_plots(input_data_root_path, family_dataset_name, timestamp, 
                              filter_name, partition_rule_name, experiment_name, 
-                             mode='single', chart_type='name', use_combined=False):
+                             mode='single', chart_type='name', use_combined=False, grid_resolution=50):
     """
     Main function to create visualization plots for experiment results.
     
@@ -1050,7 +1424,8 @@ def create_visualization_plots(input_data_root_path, family_dataset_name, timest
         vector_output_folder_path, 
         mode=mode,
         chart_type=chart_type,
-        use_combined=use_combined
+        use_combined=use_combined,
+        grid_resolution=grid_resolution
     )
     
     logging.info("END FLOW ******************* Create Enhanced Visualization Plots *******************")
@@ -1087,8 +1462,10 @@ if __name__ == "__main__":
                        help='Use combined dataset (original + control) for visualization')
     parser.add_argument('--mode', choices=['single', 'grid'], default='single',
                        help='Visualization mode: single (individual plots) or grid (combined grid)')
-    parser.add_argument('--chart-type', choices=['name', 'type'], default='name',
-                       help='Chart type: name (family_name) or type (family_type)')
+    parser.add_argument('--chart-type', choices=['name', 'type', 'overlap'], default='name',
+                       help='Chart type: name (family_name), type (family_type), or overlap (heatmap analysis)')
+    parser.add_argument('--grid-resolution', type=int, default=50,
+                       help='Grid resolution for overlap analysis (default: 50)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -1113,5 +1490,6 @@ if __name__ == "__main__":
         experiment_name, 
         mode=args.mode,
         chart_type=args.chart_type,
-        use_combined=args.control
+        use_combined=args.control,
+        grid_resolution=args.grid_resolution
     ) 
