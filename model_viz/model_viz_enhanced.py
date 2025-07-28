@@ -671,13 +671,13 @@ def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
                 cell_data = merged_df[in_cell_mask]
                 
                 if len(cell_data) == 0:
-                    overlap_grid[grid_row, grid_col] = 0
+                    overlap_grid[grid_row, grid_col] = np.nan  # Empty cells as NaN
                 else:
                     unique_families = cell_data[label_column].nunique()
                     total_points = len(cell_data)
                     
                     if unique_families <= 1:
-                        overlap_grid[grid_row, grid_col] = 0
+                        overlap_grid[grid_row, grid_col] = 0  # Perfect separation
                     else:
                         family_counts = cell_data[label_column].value_counts()
                         family_proportions = family_counts / total_points
@@ -691,7 +691,7 @@ def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
         
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax, shrink=0.8)
-        cbar.set_label('Overlap Score', rotation=270, labelpad=15)
+        cbar.set_label('Densidad de superposición', rotation=270, labelpad=15)
         
         # Parse parameters for title
         params = parse_filename_parameters(vector_file)
@@ -833,7 +833,7 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
                         )
                         cell_data = merged_df[in_cell_mask]
                         if len(cell_data) == 0:
-                            overlap_grid[grid_row, grid_col] = 0
+                            overlap_grid[grid_row, grid_col] = np.nan
                         else:
                             unique_families = cell_data[label_column].nunique()
                             total_points = len(cell_data)
@@ -850,7 +850,7 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
             logging.error(f"Error loading {vector_file}: {str(e)}")
             overlap_grids.append(np.zeros((grid_resolution, grid_resolution)))
     
-    global_max = np.max([np.max(grid) for grid in overlap_grids]) if overlap_grids else 1.0
+    global_max = np.nanmax([np.nanmax(grid) for grid in overlap_grids]) if overlap_grids else 1.0
     
     # Second pass: plot all heatmaps with shared color scale
     for i, (vector_file, overlap_grid) in enumerate(zip(vector_files, overlap_grids)):
@@ -894,10 +894,10 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
     # Add a single colorbar at the bottom for grid mode
     if n_files > 1:
         cbar = fig.colorbar(im, ax=axes.ravel(), orientation='horizontal', fraction=0.05, pad=0.08)
-        cbar.set_label('Overlap Score', fontsize=12)
+        cbar.set_label('Densidad de superposición', fontsize=12)
     else:
         cbar = plt.colorbar(im, ax=axes[0] if isinstance(axes, list) else axes, shrink=0.8)
-        cbar.set_label('Overlap Score', rotation=270, labelpad=15)
+        cbar.set_label('Densidad de superposición', rotation=270, labelpad=15)
     
     return fig, axes
 
