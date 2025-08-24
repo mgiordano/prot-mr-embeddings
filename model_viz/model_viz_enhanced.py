@@ -325,6 +325,45 @@ def create_experiment_params_text(params):
                 f"Partition: {params['partition']}")
 
 # ===============================
+# LABEL MAPPING FUNCTIONS
+# ===============================
+
+def map_family_type_labels(df, label_column):
+    """
+    Map family type labels to Spanish equivalents for better visualization.
+    
+    This function specifically handles the mapping for sequence_family_type labels:
+    - "fibrilar" -> "fibrosa"
+    - "repetitive" -> "repetitiva"
+    
+    Args:
+        df (DataFrame): Input dataframe containing the label column
+        label_column (str): Name of the column to apply mapping to
+        
+    Returns:
+        DataFrame: Dataframe with mapped labels
+    """
+    # Only apply mapping for family type columns
+    if label_column != "sequence_family_type":
+        return df
+    
+    # Create a copy to avoid modifying the original dataframe
+    df_mapped = df.copy()
+    
+    # Define the mapping dictionary
+    type_mapping = {
+        "fibrilar": "fibrosa",
+        "repetitive": "repetitiva"
+    }
+    
+    # Apply the mapping
+    df_mapped[label_column] = df_mapped[label_column].map(type_mapping).fillna(df_mapped[label_column])
+    
+    logging.info(f"Applied label mapping for {label_column}: {type_mapping}")
+    
+    return df_mapped
+
+# ===============================
 # COLOR AND LEGEND MANAGEMENT
 # ===============================
 
@@ -404,7 +443,6 @@ def generate_improved_color_palette(n_colors):
         
     return sorted_palette
     
-    return sorted_palette
 
 def generate_consistent_color_palette(labels, control_families=None):
     """
@@ -501,6 +539,9 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
     # Setup thesis style
     setup_thesis_style()
     
+    # Apply label mapping for family type columns
+    df = map_family_type_labels(df, label_column)
+    
     # Create figure with appropriate size - use square aspect ratio to prevent distortion
     fig = plt.figure(figsize=(12, 8))
     ax = fig.add_subplot(111)
@@ -515,9 +556,11 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
     control_families = None
     if label_column == "sequence_family_name" and "sequence_family_type" in df.columns:
         control_families = set()
+        # Apply mapping to family type column for control detection
+        df_mapped_types = map_family_type_labels(df, "sequence_family_type")
         for label in unique_labels:
             family_data = df[df[label_column] == label]
-            if (family_data["sequence_family_type"] == "control").any():
+            if not family_data.empty and (df_mapped_types[df_mapped_types[label_column] == label]["sequence_family_type"] == "control").any():
                 control_families.add(label)
     
     # Generate consistent color palette
@@ -627,6 +670,9 @@ def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
         
         # Merge with metadata
         merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+        
+        # Apply label mapping for family type columns
+        merged_df = map_family_type_labels(merged_df, label_column)
         
         if label_column not in merged_df.columns:
             ax.text(0.5, 0.5, f'No {label_column} data', transform=ax.transAxes, 
@@ -782,6 +828,10 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
             vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
             
             merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+            
+            # Apply label mapping for family type columns
+            merged_df = map_family_type_labels(merged_df, label_column)
+            
             if label_column in merged_df.columns:
                 all_data_points.extend(merged_df[['reduced_vector_d1', 'reduced_vector_d2']].values)
         except Exception as e:
@@ -817,6 +867,10 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
             vectors_df.reset_index(inplace=True)
             vectors_df.rename(columns={'index': 'sequence_index'}, inplace=True)
             merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+            
+            # Apply label mapping for family type columns
+            merged_df = map_family_type_labels(merged_df, label_column)
+            
             overlap_grid = np.zeros((grid_resolution, grid_resolution))
             if label_column in merged_df.columns:
                 for grid_row in range(grid_resolution):
@@ -982,6 +1036,10 @@ def create_grid_visualization(vector_files, metadata_file_path, label_column,
             
             # Merge with metadata
             merged_df = pd.merge(vectors_df, metadata_df, on='sequence_index', how='inner')
+            
+            # Apply label mapping for family type columns
+            merged_df = map_family_type_labels(merged_df, label_column)
+            
             all_data.append(merged_df)
             
             # Collect unique labels
@@ -1002,9 +1060,11 @@ def create_grid_visualization(vector_files, metadata_file_path, label_column,
             control_families = set()
             for df in all_data:
                 if df is not None:
+                    # Apply mapping to family type column for control detection
+                    df_mapped_types = map_family_type_labels(df, "sequence_family_type")
                     for label in unique_labels:
                         family_data = df[df[label_column] == label]
-                        if not family_data.empty and (family_data["sequence_family_type"] == "control").any():
+                        if not family_data.empty and (df_mapped_types[df_mapped_types[label_column] == label]["sequence_family_type"] == "control").any():
                             control_families.add(label)
     
     # Generate consistent color palette for all subplots
