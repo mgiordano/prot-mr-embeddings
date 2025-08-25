@@ -29,9 +29,10 @@ After running that project on a certain protein dataset, the output should be st
 ```
 processed_datasets/
 ├── protein_dataset_large/
-│   ├── protein_dataset_large_1_999999_1_PATTERNS.csv   # Dataset of all computed MRs
-│   ├── protein_dataset_large_1_999999_1_POSITIONS.csv  # Dataset of all mr-protein relations
-│   └── protein_dataset_large_sequence_dataset.csv      # Dataset of all proteins and their attributes
+│   ├── protein_dataset_large_1_999999_1_PATTERNS.csv           # Dataset of all computed MRs
+│   ├── protein_dataset_large_1_999999_1_POSITIONS.csv          # Dataset of all mr-protein relations
+│   ├── protein_dataset_large_sequence_dataset.csv              # Dataset of all proteins and their attributes
+│   └── control_protein_dataset_large_sequence_dataset.csv      # Dataset of all control proteins and their attributes
 └── protein_dataset_small/              
 ```
 When setting up the `INPUT_DATA_ROOT_PATH` it should point to the root processed_datasets/ to enable you to later choose on which dataset to execute the different pipeline stages. Also, each protein_dataset_name folder will be used as intermediate output result of the different pipeline stages.
@@ -182,6 +183,8 @@ python -m corpus_prep.corpus_prep_control TIMESTAMP DATASET MR_FILTER PARTITION_
 ```
 
 This script will download the unique MR vocabulary from the processed stages in BigQuery corresponding to Run ID and, for each control protein, it will locally run the Aho-Corasick algorithm to efficiently find pattern matches and build the control partition corpus. The resulting corpus file will be placed in the same corresponding folder with the `s3_corpus_control_for_eval` suffix.
+
+Make sure to have the corresponding control dataset located in the input folder of the specified DATASET name.
 
 ### Stage 3: Model evaluation - Protein vectors creation
 
