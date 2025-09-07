@@ -12,31 +12,20 @@ import utils.utils as corpus_prep_utils
 
 VECTOR_SIZE = 100
 
-def get_vector_for_bioword_partition(bioword_partition, model):
+def get_vector_for_bioword_partition(bioword_partition, sequence, model):
     """Optimized embedding vector estimation for sequence based on its bioword representation"""
-    
-    # Handle empty or NaN inputs
-    if not bioword_partition or pd.isna(bioword_partition):
-        return np.zeros(VECTOR_SIZE, dtype=np.float32)
-    
-    # Tokenize the bioword partition into a list of biowords
+
+    # Enforce strict input: must be a non-empty string
+    if not isinstance(bioword_partition, str):
+        raise TypeError(f"bioword_partition must be str, got {type(bioword_partition).__name__}")
+
     tokens = list(tokenize(bioword_partition))
     if not tokens:
-        return np.zeros(VECTOR_SIZE, dtype=np.float32)
-    
-    # Collect vectors for valid tokens only
-    valid_vectors = []
-    for token in tokens:
-        if token in model.wv:
-            valid_vectors.append(model.wv[token])
-    
-    # Return zero vector if no valid tokens found
-    if not valid_vectors:
-        return np.zeros(VECTOR_SIZE, dtype=np.float32)
-    
-    # Vectorized mean calculation using numpy
-    vectors_array = np.array(valid_vectors, dtype=np.float32)
-    return np.mean(vectors_array, axis=0)
+        # Use sequence as single token when tokens list is empty
+        tokens.append(sequence)
+
+
+    return model.wv.get_mean_vector(tokens, pre_normalize=False, post_normalize=True)
 
 #@task(log_prints=True)
 def compute_sequence_vectors(corpus_df, model, bioword_rule_column="word_partition", chunk_size=10000):
@@ -52,7 +41,11 @@ def compute_sequence_vectors(corpus_df, model, bioword_rule_column="word_partiti
         chunk = corpus_df[bioword_rule_column].iloc[i:chunk_end]
         
         # Process chunk with optimized function
-        chunk_vectors = chunk.astype(str).apply(get_vector_for_bioword_partition, args=(model,))
+        # Get corresponding sequence chunk
+        sequence_chunk = corpus_df["sequence"].iloc[i:chunk_end].astype(str)
+        chunk_vectors = pd.concat([chunk.astype(str), sequence_chunk], axis=1).apply(
+            lambda row: get_vector_for_bioword_partition(row.iloc[0], row.iloc[1], model), axis=1
+        )
         bio_vectors.extend(chunk_vectors.tolist())
         
         # Log progress every 50k sequences
@@ -66,7 +59,7 @@ def compute_sequence_vectors(corpus_df, model, bioword_rule_column="word_partiti
 #@task(log_prints=True)
 def load_corpus_eval_to_df(corpus_path: str):
     logging.info("START TASK - load_corpus_eval_to_df")
-    df = pd.read_csv(corpus_path, encoding='utf-8')
+    df = pd.read_csv(corpus_path, encoding='utf-8', keep_default_na=False)
     logging.info("END TASK - load_corpus_eval_to_df")
     return df
 
