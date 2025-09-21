@@ -70,6 +70,12 @@ def combine_datasets(vector_out_folder_path, run_id):
     logging.info(f"Original dataset: {len(original_metadata)} sequences")
     logging.info(f"Control dataset: {len(control_metadata)} sequences")
     
+    # Ensure partition_type column exists in both datasets, fill with empty strings if missing
+    if 'partition_type' not in original_metadata.columns:
+        original_metadata = original_metadata.assign(partition_type="")
+    if 'partition_type' not in control_metadata.columns:
+        control_metadata = control_metadata.assign(partition_type="")
+
     # Combine metadata (original first, then control)
     combined_metadata = pd.concat([original_metadata, control_metadata], ignore_index=True)
     logging.info(f"Combined metadata: {len(combined_metadata)} sequences")

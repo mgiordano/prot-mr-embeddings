@@ -96,11 +96,16 @@ def create_and_save_metadata(corpus_df, filename_prefix, parent_folder_path, is_
     logging.info("START TASK -  save metadata.tsv")
     # save metadata tsv
     metadata_df = corpus_df[["sequence", "sequence_name", "sequence_family_name", "sequence_family_type"]].copy()
-    
-    # For control datasets, set sequence_family_type to "control"
+
+    # For control datasets, set sequence_family_type to "control" and add partition_type column
     if is_control:
         metadata_df["sequence_family_type"] = "control"
-    
+        # Add partition_type column based on word_partition content
+        if "word_partition" in corpus_df.columns:
+            metadata_df["partition_type"] = np.where(corpus_df["word_partition"] == "", "sequence", "mr")
+        else:
+            logging.warning("word_partition column not found in corpus_df, cannot determine partition_type")
+
     metadata_filename = filename_prefix + "-metadata.tsv"
     metadata_out_path = os.path.join(parent_folder_path, metadata_filename)
     metadata_df.to_csv(metadata_out_path, sep='\t', index=False)

@@ -1223,7 +1223,7 @@ def load_and_merge_data(vector_file_path, metadata_file_path):
     
     # Load metadata
     logging.info(f"Loading metadata from: {metadata_file_path}")
-    metadata_df = pd.read_csv(metadata_file_path, sep='\t')
+    metadata_df = pd.read_csv(metadata_file_path, sep='\t', encoding='utf-8', keep_default_na=False) 
     metadata_df.reset_index(inplace=True)
     metadata_df.rename(columns={'index': 'sequence_index'}, inplace=True)
     
