@@ -473,15 +473,31 @@ def generate_consistent_color_palette(labels, control_families=None):
             for idx, family in enumerate(non_control_labels):  # Already sorted
                 colors[family] = colorful_palette[idx]
         
-        # Assign gray shades to control families
+        # Assign muted colors to control families for better distinction
         if control_labels:
+            # Use a set of muted, distinguishable colors instead of pure grayscale
+            # This provides better visual separation while maintaining the "control" aesthetic
+            muted_colors = [
+                '#8c8c8c',  # Medium gray
+                '#7d94b5',  # Muted blue-gray
+                '#9caf88',  # Muted green-gray
+                '#b5999c',  # Muted rose-gray
+                '#c4a573',  # Muted gold-gray
+                '#8fb3c7',  # Muted blue
+                '#a8c09a',  # Muted green
+                '#c19fa8',  # Muted pink
+                '#d4b896',  # Muted tan
+                '#9fb3c7',  # Another muted blue shade
+            ]
+
             # For control families, use grayscale with good separation
-            lightness_values = np.linspace(0.3, 0.7, len(control_labels))
-            gray_palette = [(l, l, l) for l in lightness_values]
-            
+            #lightness_values = np.linspace(0.3, 0.7, len(control_labels))
+            #gray_palette = [(l, l, l) for l in lightness_values]
+            # If we have more control families than colors, cycle through the palette
             for idx, family in enumerate(control_labels):  # Already sorted
-                colors[family] = gray_palette[idx]
-        
+                colors[family] = muted_colors[idx % len(muted_colors)]
+                #colors[family] = gray_palette[idx]
+
         return colors
     
     else:

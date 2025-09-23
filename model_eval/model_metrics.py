@@ -13,6 +13,9 @@ from sklearn.metrics import silhouette_samples
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 import time
+import concurrent.futures
+import threading
+from functools import partial
 
 from utils.utils import dataset_names, filters, partition_rules
 import utils.utils as utils
@@ -298,39 +301,70 @@ def centroids_to_string_array(centroids):
     
     return centroid_strings
 
-def analyze_cluster_metrics(experiment_folder_path, vector_output_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False):
+# Thread-safe CSV writer for incremental results
+_csv_write_lock = threading.Lock()
+
+def append_to_csv_threadsafe(results_list, output_path, write_headers=False):
     """
-    Analyze cluster-level metrics for all dimensional spaces: original vectors_bio, PCA reductions, and t-SNE transformations
+    Thread-safe function to append results to CSV file
+    
+    Args:
+        results_list: List of result dictionaries to write
+        output_path: Path to output CSV file
+        write_headers: Whether to write headers (first time writing)
     """
-    logging.info("START TASK - analyze_cluster_metrics")
+    if not results_list:
+        return
     
-    # Load metadata
-    metadata_df = load_metadata(metadata_file_path)
-    class_labels = metadata_df[class_label_column].values
-    unique_classes = np.unique(class_labels)
+    # Convert to DataFrame for easier CSV writing
+    df = pd.DataFrame(results_list)
     
-    results = []
+    with _csv_write_lock:
+        # Check if file exists and whether we need headers
+        file_exists = os.path.exists(output_path)
+        write_header = write_headers and not file_exists
+        
+        # Append to CSV file
+        df.to_csv(output_path, mode='a', index=False, header=write_header)
+        
+        logging.info(f"Appended {len(results_list)} results to {output_path}")
+
+def process_single_vector_file(file_info):
+    """
+    Process a single vector file for cluster metrics analysis
     
-    # 1. Analyze original vectors_bio (highest dimensional space)
-    logging.info("Analyzing original vectors_bio space")
+    Args:
+        file_info: Dictionary containing file processing information
+    
+    Returns:
+        list: Results for this file
+    """
     try:
-        if use_combined:
-            bio_vectors_filename = f"{run_id}-combined-vectors_bio.tsv"
-        else:
-            bio_vectors_filename = f"{run_id}-vectors_bio.tsv"
+        file_path = file_info['file_path']
+        file_type = file_info['file_type']  # 'bio', 'pca', or 'tsne'
+        class_labels = file_info['class_labels']
+        unique_classes = file_info['unique_classes']
+        run_id = file_info['run_id']
         
-        bio_vectors_path = os.path.join(vector_output_folder_path, bio_vectors_filename)
+        logging.info(f"Processing {file_type} file: {os.path.basename(file_path)}")
+        start_time = time.time()
         
-        if os.path.exists(bio_vectors_path):
-            bio_vectors = load_vector_data(bio_vectors_path)
-            bio_silhouette_scores = calculate_class_silhouette_scores(bio_vectors, class_labels)
-            bio_centroids = calculate_class_centroids(bio_vectors, class_labels, unique_classes)
-            bio_centroid_strings = centroids_to_string_array(bio_centroids)
-            
-            # Add results for each class in bio vectors space
+        # Load vector data
+        vectors = load_vector_data(file_path)
+        
+        # Calculate silhouette scores and centroids
+        silhouette_scores = calculate_class_silhouette_scores(vectors, class_labels)
+        centroids = calculate_class_centroids(vectors, class_labels, unique_classes)
+        centroid_strings = centroids_to_string_array(centroids)
+        
+        # Create results for each class
+        results = []
+        
+        if file_type == 'bio':
+            # Bio vectors - original space
             for i, class_name in enumerate(unique_classes):
                 result_row = {
-                    'filename': bio_vectors_filename,
+                    'filename': os.path.basename(file_path),
                     'timestamp': run_id.split('-')[0],
                     'dataset': run_id.split('-')[1],
                     'filter': run_id.split('-')[2],
@@ -341,38 +375,19 @@ def analyze_cluster_metrics(experiment_folder_path, vector_output_folder_path, r
                     'learning_rate': '',
                     'max_iterations': np.nan,
                     'random_state': np.nan,
-                    'num_dimensions': bio_vectors.shape[1],
+                    'num_dimensions': vectors.shape[1],
                     'class_name': class_name,
-                    'centroid': bio_centroid_strings[i],
-                    'silhouette_score': bio_silhouette_scores[class_name],
+                    'centroid': centroid_strings[i],
+                    'silhouette_score': silhouette_scores[class_name],
                     'num_class_points': np.sum(class_labels == class_name)
                 }
                 results.append(result_row)
-        else:
-            logging.warning(f"Bio vectors file not found: {bio_vectors_path}")
-            
-    except Exception as e:
-        logging.error(f"Error analyzing bio vectors: {str(e)}")
-    
-    # 2. Analyze PCA reductions in experiment folder
-    logging.info("Analyzing PCA reduction spaces")
-    try:
-        tsv_pattern = os.path.join(experiment_folder_path, "*.tsv")
-        tsv_files = glob.glob(tsv_pattern)
-        pca_files = [f for f in tsv_files if 'vectors_pca' in os.path.basename(f)]
-        
-        for pca_file in pca_files:
-            logging.info(f"Processing PCA file: {os.path.basename(pca_file)}")
-            
-            pca_vectors = load_vector_data(pca_file)
-            pca_silhouette_scores = calculate_class_silhouette_scores(pca_vectors, class_labels)
-            pca_centroids = calculate_class_centroids(pca_vectors, class_labels, unique_classes)
-            pca_centroid_strings = centroids_to_string_array(pca_centroids)
-            
-            # Add results for each class in PCA space
+                
+        elif file_type == 'pca':
+            # PCA vectors
             for i, class_name in enumerate(unique_classes):
                 result_row = {
-                    'filename': os.path.basename(pca_file),
+                    'filename': os.path.basename(file_path),
                     'timestamp': run_id.split('-')[0],
                     'dataset': run_id.split('-')[1],
                     'filter': run_id.split('-')[2],
@@ -383,39 +398,21 @@ def analyze_cluster_metrics(experiment_folder_path, vector_output_folder_path, r
                     'learning_rate': '',
                     'max_iterations': np.nan,
                     'random_state': np.nan,
-                    'num_dimensions': pca_vectors.shape[1],
+                    'num_dimensions': vectors.shape[1],
                     'class_name': class_name,
-                    'centroid': pca_centroid_strings[i],
-                    'silhouette_score': pca_silhouette_scores[class_name],
+                    'centroid': centroid_strings[i],
+                    'silhouette_score': silhouette_scores[class_name],
                     'num_class_points': np.sum(class_labels == class_name)
                 }
                 results.append(result_row)
                 
-    except Exception as e:
-        logging.error(f"Error analyzing PCA vectors: {str(e)}")
-    
-    # 3. Analyze t-SNE transformations
-    logging.info("Analyzing t-SNE transformation spaces")
-    try:
-        tsv_pattern = os.path.join(experiment_folder_path, "*.tsv")
-        tsv_files = glob.glob(tsv_pattern)
-        tsne_files = [f for f in tsv_files if 'vectors_tsne' in os.path.basename(f)]
-        
-        for tsne_file in tsne_files:
-            logging.info(f"Processing t-SNE file: {os.path.basename(tsne_file)}")
+        elif file_type == 'tsne':
+            # t-SNE vectors - parse parameters from filename
+            params = parse_filename_parameters(file_path)
             
-            # Parse parameters from filename
-            params = parse_filename_parameters(tsne_file)
-            
-            tsne_vectors = load_vector_data(tsne_file)
-            tsne_silhouette_scores = calculate_class_silhouette_scores(tsne_vectors, class_labels)
-            tsne_centroids = calculate_class_centroids(tsne_vectors, class_labels, unique_classes)
-            tsne_centroid_strings = centroids_to_string_array(tsne_centroids)
-            
-            # Add results for each class in t-SNE space
             for i, class_name in enumerate(unique_classes):
                 result_row = {
-                    'filename': os.path.basename(tsne_file),
+                    'filename': os.path.basename(file_path),
                     'timestamp': params['timestamp'],
                     'dataset': params['dataset'],
                     'filter': params['filter'],
@@ -426,26 +423,170 @@ def analyze_cluster_metrics(experiment_folder_path, vector_output_folder_path, r
                     'learning_rate': params['learning_rate'],
                     'max_iterations': int(params['max_iterations']),
                     'random_state': int(params['random_state']),
-                    'num_dimensions': tsne_vectors.shape[1],
+                    'num_dimensions': vectors.shape[1],
                     'class_name': class_name,
-                    'centroid': tsne_centroid_strings[i],
-                    'silhouette_score': tsne_silhouette_scores[class_name],
+                    'centroid': centroid_strings[i],
+                    'silhouette_score': silhouette_scores[class_name],
                     'num_class_points': np.sum(class_labels == class_name)
                 }
                 results.append(result_row)
-                
+        
+        elapsed_time = time.time() - start_time
+        logging.info(f"Completed {file_type} file {os.path.basename(file_path)} in {elapsed_time:.2f}s")
+        
+        return results
+        
     except Exception as e:
-        logging.error(f"Error analyzing t-SNE vectors: {str(e)}")
+        logging.error(f"Error processing file {file_info.get('file_path', 'unknown')}: {str(e)}")
+        return []
+
+def analyze_cluster_metrics_parallel(experiment_folder_path, vector_output_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False, max_workers=None):
+    """
+    Analyze cluster-level metrics using parallel processing and incremental CSV writing
     
-    # Convert to DataFrame
-    results_df = pd.DataFrame(results)
+    Args:
+        experiment_folder_path: Path to experiment folder
+        vector_output_folder_path: Path to vector output folder
+        run_id: Run identifier
+        metadata_file_path: Path to metadata file
+        class_label_column: Column name for class labels
+        use_combined: Whether using combined dataset
+        max_workers: Maximum number of parallel workers (None = auto)
     
-    if not results_df.empty:
-        # Sort by technique, dimensions, class name, and experiment parameters
-        results_df = results_df.sort_values(['technique', 'num_dimensions', 'class_name', 'perplexity', 'learning_rate'])
+    Returns:
+        str: Path to output CSV file
+    """
+    logging.info("START TASK - analyze_cluster_metrics_parallel")
     
-    logging.info("END TASK - analyze_cluster_metrics")
-    return results_df
+    # Load metadata once (shared across all workers)
+    metadata_df = load_metadata(metadata_file_path)
+    class_labels = metadata_df[class_label_column].values
+    unique_classes = np.unique(class_labels)
+    
+    # Prepare output file path
+    metrics_folder = os.path.join(experiment_folder_path, "metrics")
+    os.makedirs(metrics_folder, exist_ok=True)
+    cluster_output_path = os.path.join(metrics_folder, "cluster_metrics.csv")
+    
+    # Remove existing output file to start fresh
+    if os.path.exists(cluster_output_path):
+        os.remove(cluster_output_path)
+    
+    # Collect all files to process
+    files_to_process = []
+    
+    # 1. Bio vectors file
+    if use_combined:
+        bio_vectors_filename = f"{run_id}-combined-vectors_bio.tsv"
+    else:
+        bio_vectors_filename = f"{run_id}-vectors_bio.tsv"
+    
+    bio_vectors_path = os.path.join(vector_output_folder_path, bio_vectors_filename)
+    if os.path.exists(bio_vectors_path):
+        files_to_process.append({
+            'file_path': bio_vectors_path,
+            'file_type': 'bio',
+            'class_labels': class_labels,
+            'unique_classes': unique_classes,
+            'run_id': run_id
+        })
+    else:
+        logging.warning(f"Bio vectors file not found: {bio_vectors_path}")
+    
+    # 2. PCA files
+    tsv_pattern = os.path.join(experiment_folder_path, "*.tsv")
+    tsv_files = glob.glob(tsv_pattern)
+    pca_files = [f for f in tsv_files if 'vectors_pca' in os.path.basename(f)]
+    
+    for pca_file in pca_files:
+        files_to_process.append({
+            'file_path': pca_file,
+            'file_type': 'pca',
+            'class_labels': class_labels,
+            'unique_classes': unique_classes,
+            'run_id': run_id
+        })
+    
+    # 3. t-SNE files
+    tsne_files = [f for f in tsv_files if 'vectors_tsne' in os.path.basename(f)]
+    
+    for tsne_file in tsne_files:
+        files_to_process.append({
+            'file_path': tsne_file,
+            'file_type': 'tsne',
+            'class_labels': class_labels,
+            'unique_classes': unique_classes,
+            'run_id': run_id
+        })
+    
+    logging.info(f"Found {len(files_to_process)} files to process ({len(pca_files)} PCA, {len(tsne_files)} t-SNE, {1 if bio_vectors_path and os.path.exists(bio_vectors_path) else 0} bio)")
+    
+    if not files_to_process:
+        logging.warning("No vector files found to process")
+        return cluster_output_path
+    
+    # Set default max_workers based on available cores and file count
+    if max_workers is None:
+        import multiprocessing
+        max_workers = min(len(files_to_process), multiprocessing.cpu_count())
+    
+    logging.info(f"Using {max_workers} parallel workers")
+    
+    # Process files in parallel using ProcessPoolExecutor
+    # (better than ThreadPoolExecutor for CPU-bound numpy operations due to GIL)
+    total_results_written = 0
+    headers_written = False
+    
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all jobs
+        future_to_file = {executor.submit(process_single_vector_file, file_info): file_info 
+                         for file_info in files_to_process}
+        
+        # Process completed jobs and write results incrementally
+        for future in concurrent.futures.as_completed(future_to_file):
+            file_info = future_to_file[future]
+            try:
+                results = future.result()
+                if results:
+                    # Write results immediately to CSV
+                    append_to_csv_threadsafe(results, cluster_output_path, write_headers=not headers_written)
+                    headers_written = True
+                    total_results_written += len(results)
+                    logging.info(f"Completed processing {file_info['file_type']} file: {os.path.basename(file_info['file_path'])}")
+                else:
+                    logging.warning(f"No results from {file_info['file_type']} file: {os.path.basename(file_info['file_path'])}")
+                    
+            except Exception as e:
+                logging.error(f"Error processing {file_info['file_type']} file {os.path.basename(file_info['file_path'])}: {str(e)}")
+    
+    logging.info(f"END TASK - analyze_cluster_metrics_parallel: {total_results_written} total results written to {cluster_output_path}")
+    
+    return cluster_output_path
+
+def analyze_cluster_metrics(experiment_folder_path, vector_output_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False, max_workers=None):
+    """
+    Backward compatibility wrapper for analyze_cluster_metrics_parallel
+    Returns a DataFrame like the original function for compatibility
+    """
+    logging.info("Using parallel cluster metrics analysis for better performance")
+    
+    # Call the parallel version
+    csv_path = analyze_cluster_metrics_parallel(
+        experiment_folder_path, vector_output_folder_path, run_id, 
+        metadata_file_path, class_label_column, use_combined, max_workers
+    )
+    
+    # Read the CSV back into a DataFrame for compatibility
+    if os.path.exists(csv_path):
+        results_df = pd.read_csv(csv_path)
+        
+        if not results_df.empty:
+            # Sort by technique, dimensions, class name, and experiment parameters
+            results_df = results_df.sort_values(['technique', 'num_dimensions', 'class_name', 'perplexity', 'learning_rate'])
+        
+        return results_df
+    else:
+        return pd.DataFrame()
 
 def calculate_scree_data(high_dim_data):
     """
@@ -577,11 +718,11 @@ def load_high_dim_data(experiment_folder_path, run_id, use_combined=False):
     
     return load_vector_data(high_dim_path)
 
-def analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False):
+def analyze_tsne_metrics_parallel(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False, max_workers=None):
     """
-    Analyze metrics for all t-SNE files in the experiment folder
+    Parallel version of analyze_tsne_metrics using ProcessPoolExecutor for better performance
     """
-    logging.info("START TASK - analyze_tsne_metrics")
+    logging.info("START TASK - analyze_tsne_metrics_parallel")
     
     # Find all t-SNE TSV files in experiment folder
     tsv_pattern = os.path.join(experiment_folder_path, "*.tsv")
@@ -615,7 +756,7 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, cla
         logging.error(f"Could not load metadata: {str(e)}")
         return pd.DataFrame()
     
-    # Calculate high-dimensional neighbors ONCE for all experiments (optimization)
+    # Pre-compute shared data for all experiments (optimization)
     logging.info("Computing high-dimensional neighbors once for all experiments")
     high_dim_neighbors = find_k_nearest_neighbors(high_dim_data, k=10)
     
@@ -653,61 +794,49 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, cla
         high_dim_class_neighbors = None
         knc_k = 0
     
+    # Prepare data packages for parallel processing
+    file_packages = []
+    for tsne_file in tsne_files:
+        file_packages.append({
+            'tsne_file': tsne_file,
+            'high_dim_data': high_dim_data,
+            'high_dim_neighbors': high_dim_neighbors,
+            'high_dim_distances': high_dim_distances,
+            'sample_indices': sample_indices,
+            'class_labels': class_labels,
+            'unique_classes': unique_classes,
+            'high_dim_class_neighbors': high_dim_class_neighbors,
+            'knc_k': knc_k
+        })
+    
+    # Set default max_workers based on available cores and file count
+    if max_workers is None:
+        import multiprocessing
+        max_workers = min(len(tsne_files), multiprocessing.cpu_count())
+    
+    logging.info(f"Using {max_workers} parallel workers for t-SNE metrics")
+    
     results = []
     
-    for tsne_file in tsne_files:
-        logging.info(f"Processing t-SNE file: {os.path.basename(tsne_file)}")
+    # Process files in parallel
+    with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all jobs
+        future_to_file = {executor.submit(process_single_tsne_file, package): package 
+                         for package in file_packages}
         
-        try:
-            # Parse parameters from filename
-            params = parse_filename_parameters(tsne_file)
-            
-            # Load t-SNE vectors (2D)
-            low_dim_data = load_vector_data(tsne_file)
-            
-            # Check data consistency
-            if high_dim_data.shape[0] != low_dim_data.shape[0]:
-                logging.error(f"Dimension mismatch: high_dim={high_dim_data.shape[0]}, low_dim={low_dim_data.shape[0]}")
-                continue
-            
-            # Calculate KNN preservation metric (using pre-computed high-dim neighbors)
-            knn_preservation = calculate_knn_preservation(high_dim_neighbors, low_dim_data, k=10)
-            
-            # Calculate CPD metric (global structure preservation) using pre-computed distances
-            cpd_correlation = calculate_cpd(high_dim_distances, low_dim_data, sample_indices)
-            
-            # Calculate KNC metric (class-level structure preservation) using pre-computed data
-            if high_dim_class_neighbors is not None and knc_k > 0:
-                knc_preservation = calculate_knc_preservation(high_dim_class_neighbors, low_dim_data, class_labels, unique_classes, k=knc_k)
-            else:
-                knc_preservation = np.nan  # Not enough classes for KNC analysis
-            
-            # Create result row
-            result_row = {
-                'filename': os.path.basename(tsne_file),
-                'timestamp': params['timestamp'],
-                'dataset': params['dataset'],
-                'filter': params['filter'],
-                'partition': params['partition'],
-                'vectors_method': params['vectors_method'],
-                'method': params['method'],
-                'perplexity': int(params['perplexity']),
-                'learning_rate': params['learning_rate'],  # Keep as string to handle 'auto'
-                'max_iterations': int(params['max_iterations']),
-                'random_state': int(params['random_state']),
-                'knn_preservation_k10': knn_preservation,
-                'cpd_correlation': cpd_correlation,
-                'knc_preservation_k10': knc_preservation,
-                'num_points': high_dim_data.shape[0],
-                'high_dim_features': high_dim_data.shape[1],
-                'low_dim_features': low_dim_data.shape[1]
-            }
-            
-            results.append(result_row)
-            
-        except Exception as e:
-            logging.error(f"Error processing {tsne_file}: {str(e)}")
-            continue
+        # Collect results
+        for future in concurrent.futures.as_completed(future_to_file):
+            package = future_to_file[future]
+            try:
+                result = future.result()
+                if result:
+                    results.append(result)
+                    logging.info(f"Completed t-SNE metrics for: {os.path.basename(package['tsne_file'])}")
+                else:
+                    logging.warning(f"No results from: {os.path.basename(package['tsne_file'])}")
+                    
+            except Exception as e:
+                logging.error(f"Error processing {os.path.basename(package['tsne_file'])}: {str(e)}")
     
     # Convert to DataFrame
     results_df = pd.DataFrame(results)
@@ -716,10 +845,90 @@ def analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, cla
         # Sort by perplexity and learning rate for better organization
         results_df = results_df.sort_values(['perplexity', 'learning_rate', 'max_iterations'])
     
-    logging.info("END TASK - analyze_tsne_metrics")
+    logging.info("END TASK - analyze_tsne_metrics_parallel")
     return results_df
 
-def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False):
+def process_single_tsne_file(package):
+    """
+    Process a single t-SNE file for metrics analysis
+    
+    Args:
+        package: Dictionary containing all necessary data for processing
+    
+    Returns:
+        dict: Result row for this t-SNE file
+    """
+    try:
+        tsne_file = package['tsne_file']
+        high_dim_data = package['high_dim_data']
+        high_dim_neighbors = package['high_dim_neighbors']
+        high_dim_distances = package['high_dim_distances']
+        sample_indices = package['sample_indices']
+        class_labels = package['class_labels']
+        unique_classes = package['unique_classes']
+        high_dim_class_neighbors = package['high_dim_class_neighbors']
+        knc_k = package['knc_k']
+        
+        logging.info(f"Processing t-SNE file: {os.path.basename(tsne_file)}")
+        
+        # Parse parameters from filename
+        params = parse_filename_parameters(tsne_file)
+        
+        # Load t-SNE vectors (2D)
+        low_dim_data = load_vector_data(tsne_file)
+        
+        # Check data consistency
+        if high_dim_data.shape[0] != low_dim_data.shape[0]:
+            logging.error(f"Dimension mismatch: high_dim={high_dim_data.shape[0]}, low_dim={low_dim_data.shape[0]}")
+            return None
+        
+        # Calculate KNN preservation metric (using pre-computed high-dim neighbors)
+        knn_preservation = calculate_knn_preservation(high_dim_neighbors, low_dim_data, k=10)
+        
+        # Calculate CPD metric (global structure preservation) using pre-computed distances
+        cpd_correlation = calculate_cpd(high_dim_distances, low_dim_data, sample_indices)
+        
+        # Calculate KNC metric (class-level structure preservation) using pre-computed data
+        if high_dim_class_neighbors is not None and knc_k > 0:
+            knc_preservation = calculate_knc_preservation(high_dim_class_neighbors, low_dim_data, class_labels, unique_classes, k=knc_k)
+        else:
+            knc_preservation = np.nan  # Not enough classes for KNC analysis
+        
+        # Create result row
+        result_row = {
+            'filename': os.path.basename(tsne_file),
+            'timestamp': params['timestamp'],
+            'dataset': params['dataset'],
+            'filter': params['filter'],
+            'partition': params['partition'],
+            'vectors_method': params['vectors_method'],
+            'method': params['method'],
+            'perplexity': int(params['perplexity']),
+            'learning_rate': params['learning_rate'],  # Keep as string to handle 'auto'
+            'max_iterations': int(params['max_iterations']),
+            'random_state': int(params['random_state']),
+            'knn_preservation_k10': knn_preservation,
+            'cpd_correlation': cpd_correlation,
+            'knc_preservation_k10': knc_preservation,
+            'num_points': high_dim_data.shape[0],
+            'high_dim_features': high_dim_data.shape[1],
+            'low_dim_features': low_dim_data.shape[1]
+        }
+        
+        return result_row
+        
+    except Exception as e:
+        logging.error(f"Error processing t-SNE file {package.get('tsne_file', 'unknown')}: {str(e)}")
+        return None
+
+def analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False):
+    """
+    Backward compatibility wrapper for analyze_tsne_metrics_parallel
+    """
+    logging.info("Using parallel t-SNE metrics analysis for better performance")
+    return analyze_tsne_metrics_parallel(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined)
+
+def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined=False, max_workers=None):
     """Create metrics analysis for all TSV files in the experiment folder"""
     logging.info("START TASK - create_metrics_for_experiment")
     
@@ -728,7 +937,7 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_
     os.makedirs(metrics_folder, exist_ok=True)
     
     # Analyze t-SNE metrics
-    metrics_df = analyze_tsne_metrics(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined)
+    metrics_df = analyze_tsne_metrics_parallel(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined, max_workers)
     
     if metrics_df.empty:
         logging.warning("No metrics computed - no valid t-SNE files found")
@@ -801,7 +1010,7 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_
             vector_output_folder_path = os.path.dirname(experiment_folder_path).replace('/experiments', '')
             
             cluster_df = analyze_cluster_metrics(
-                experiment_folder_path, vector_output_folder_path, run_id, metadata_file_path, class_label_column, use_combined
+                experiment_folder_path, vector_output_folder_path, run_id, metadata_file_path, class_label_column, use_combined, max_workers
             )
             
             if not cluster_df.empty:
@@ -865,7 +1074,7 @@ def create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_
     
     logging.info("END TASK - create_metrics_for_experiment")
 
-def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, experiment_name, class_label_column, use_combined=False):
+def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, experiment_name, class_label_column, use_combined=False, max_workers=None):
     """Main flow to create metrics analysis for experiment results"""
     logging.info("START FLOW ******************* Create t-SNE Metrics *******************")
     
@@ -905,7 +1114,7 @@ def create_tsne_metrics(input_data_root_path, family_dataset_name, timestamp, fi
     logging.info(f"Using class label column: {class_label_column}")
     
     # Create metrics for all vector files in the experiment
-    create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined)
+    create_metrics_for_experiment(experiment_folder_path, run_id, metadata_file_path, class_label_column, use_combined, max_workers)
     
     logging.info("END FLOW ******************* Create t-SNE Metrics *******************")
 
@@ -944,6 +1153,10 @@ if __name__ == "__main__":
     parser.add_argument('--control', 
                         action='store_true',
                         help='Use combined dataset (original + control) for metrics analysis')
+    parser.add_argument('--max-workers', 
+                        type=int,
+                        default=None,
+                        help='Maximum number of parallel workers for cluster analysis (default: auto-detect based on CPU cores)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -968,5 +1181,6 @@ if __name__ == "__main__":
         partition_rule_name, 
         experiment_name,
         class_label_column,
-        args.control
+        args.control,
+        args.max_workers
     ) 
