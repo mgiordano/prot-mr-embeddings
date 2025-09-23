@@ -1,4 +1,4 @@
-# thesis_exp
+# Protein Bioword embeddings based on Maximal Repeats
 
 ## Introduction
 
