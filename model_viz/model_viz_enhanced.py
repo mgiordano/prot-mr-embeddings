@@ -652,7 +652,7 @@ def create_enhanced_scatter_plot(df, label_column, output_file=None, point_size=
     return fig, ax
 
 def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
-                                 output_file=None, grid_resolution=50):
+                                 output_file=None, grid_resolution=50, max_heat_score=None):
     """
     Create a single overlap heatmap for one experiment.
     
@@ -662,6 +662,7 @@ def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
         label_column (str): Column name to use for family identification
         output_file (str, optional): Path to save the plot
         grid_resolution (int): Number of grid cells per dimension (default 50 for 50x50 grid)
+        max_heat_score (float, optional): Fixed maximum value for color scale. If None, uses data maximum.
         
     Returns:
         tuple: (fig, ax) matplotlib objects
@@ -747,9 +748,11 @@ def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
                         overlap_score = entropy * unique_families * np.log(total_points + 1)
                         overlap_grid[grid_row, grid_col] = overlap_score
         
-        # Create heatmap
+        # Create heatmap with optional fixed max value
+        vmax = max_heat_score if max_heat_score is not None else np.nanmax(overlap_grid)
         im = ax.imshow(overlap_grid, extent=[x_min, x_max, y_min, y_max],
-                      origin='lower', cmap='viridis', aspect='equal', interpolation='bilinear')
+                      origin='lower', cmap='viridis', aspect='equal', interpolation='bilinear',
+                      vmin=0, vmax=vmax)
         
         # Add colorbar
         cbar = plt.colorbar(im, ax=ax, shrink=0.8)
@@ -777,7 +780,7 @@ def create_single_overlap_heatmap(vector_file, metadata_file_path, label_column,
     return fig, ax
 
 def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
-                          output_file=None, grid_resolution=50):
+                          output_file=None, grid_resolution=50, max_heat_score=None):
     """
     Create an overlap heatmap analysis showing family overlap in different experiments.
     
@@ -787,6 +790,7 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
         label_column (str): Column name to use for family identification
         output_file (str, optional): Path to save the plot
         grid_resolution (int): Number of grid cells per dimension (default 50 for 50x50 grid)
+        max_heat_score (float, optional): Fixed maximum value for color scale. If None, uses global data maximum.
         
     Returns:
         tuple: (fig, axes) matplotlib objects
@@ -920,7 +924,11 @@ def create_overlap_heatmap(vector_files, metadata_file_path, label_column,
             logging.error(f"Error loading {vector_file}: {str(e)}")
             overlap_grids.append(np.zeros((grid_resolution, grid_resolution)))
     
-    global_max = np.nanmax([np.nanmax(grid) for grid in overlap_grids]) if overlap_grids else 1.0
+    # Calculate global max value for consistent color scale
+    if max_heat_score is not None:
+        global_max = max_heat_score
+    else:
+        global_max = np.nanmax([np.nanmax(grid) for grid in overlap_grids]) if overlap_grids else 1.0
     
     # Second pass: plot all heatmaps with shared color scale
     for i, (vector_file, overlap_grid) in enumerate(zip(vector_files, overlap_grids)):
@@ -1257,7 +1265,7 @@ def load_and_merge_data(vector_file_path, metadata_file_path):
 
 def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_id, 
                                output_folder_path, mode='single', chart_type='name', 
-                               use_combined=False, grid_resolution=50):
+                               use_combined=False, grid_resolution=50, max_heat_score=None):
     """
     Create plots for all TSV files in the experiment folder.
     
@@ -1269,6 +1277,8 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
         mode (str): 'single' or 'grid' visualization mode
         chart_type (str): 'name' or 'type' for family labeling
         use_combined (bool): Whether using combined dataset
+        grid_resolution (int): Grid resolution for overlap analysis
+        max_heat_score (float, optional): Fixed maximum value for overlap heatmap color scale
     """
     logging.info("START TASK - create_plots_for_experiment")
     
@@ -1322,7 +1332,8 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
                             metadata_file_path,
                             label_column,
                             output_file=overlap_output_path,
-                            grid_resolution=grid_resolution
+                            grid_resolution=grid_resolution,
+                            max_heat_score=max_heat_score
                         )
                         
                         # Save the overlap plot
@@ -1351,7 +1362,8 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
                         metadata_file_path,
                         label_column,
                         output_file=overlap_output_path,
-                        grid_resolution=grid_resolution  # Use passed parameter
+                        grid_resolution=grid_resolution,
+                        max_heat_score=max_heat_score
                     )
                     
                     # Save the overlap plot
@@ -1439,7 +1451,8 @@ def create_plots_for_experiment(experiment_folder_path, metadata_file_path, run_
 
 def create_visualization_plots(input_data_root_path, family_dataset_name, timestamp, 
                              filter_name, partition_rule_name, experiment_name, 
-                             mode='single', chart_type='name', use_combined=False, grid_resolution=50):
+                             mode='single', chart_type='name', use_combined=False, 
+                             grid_resolution=50, max_heat_score=None):
     """
     Main function to create visualization plots for experiment results.
     
@@ -1453,6 +1466,8 @@ def create_visualization_plots(input_data_root_path, family_dataset_name, timest
         mode (str): 'single' or 'grid' visualization mode
         chart_type (str): 'name' or 'type' for family labeling
         use_combined (bool): Whether to use combined dataset
+        grid_resolution (int): Grid resolution for overlap analysis
+        max_heat_score (float, optional): Fixed maximum value for overlap heatmap color scale
     """
     logging.info("START FLOW ******************* Create Enhanced Visualization Plots *******************")
     
@@ -1501,7 +1516,8 @@ def create_visualization_plots(input_data_root_path, family_dataset_name, timest
         mode=mode,
         chart_type=chart_type,
         use_combined=use_combined,
-        grid_resolution=grid_resolution
+        grid_resolution=grid_resolution,
+        max_heat_score=max_heat_score
     )
     
     logging.info("END FLOW ******************* Create Enhanced Visualization Plots *******************")
@@ -1542,6 +1558,8 @@ if __name__ == "__main__":
                        help='Chart type: name (family_name), type (family_type), or overlap (heatmap analysis)')
     parser.add_argument('--grid-resolution', type=int, default=50,
                        help='Grid resolution for overlap analysis (default: 50)')
+    parser.add_argument('--max-heat-score', type=float, default=None,
+                       help='Fixed maximum value for overlap heatmap color scale (default: None, uses data maximum)')
     
     # Parse arguments
     args = parser.parse_args()
@@ -1567,5 +1585,6 @@ if __name__ == "__main__":
         mode=args.mode,
         chart_type=args.chart_type,
         use_combined=args.control,
-        grid_resolution=args.grid_resolution
+        grid_resolution=args.grid_resolution,
+        max_heat_score=args.max_heat_score
     ) 

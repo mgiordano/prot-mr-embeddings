@@ -6,7 +6,7 @@ services:
     container_name: prefect-postgres
     restart: always  # Ensure the container restarts automatically
     volumes:
-      - prefectdb:/var/lib/postgresql/data
+      - ~/prefect-postgres-data:/var/lib/postgresql/data
     ports:
       - "5432:5432"
     environment:
@@ -14,5 +14,3 @@ services:
       - POSTGRES_PASSWORD=yourTopS3cretPassw0rd!
       - POSTGRES_DB=prefect
   
-volumes:
-  prefectdb:  # Define the named volume for persistent data
