@@ -352,6 +352,10 @@ class dataset_names():
     TEST_GROUP = "testGroupDataset"
     NANO_GROUP = "nanoGroupDataset"
     FAMILY = "familyDataset"
+    BSC = "bscDataset"
+    FAMILY_200 = "familyDataset200"
+    FAMILY_200_M = "familyDataset200minus"
+    BSC_ANK = "bscNEWAnkDataset"
 
 class data_step_names():
     S1_FILTERED_MR = "s1_filtered_mrs"
@@ -381,6 +385,12 @@ class filters():
     MR_FILTER_DROP_NN = MRFilter(condition="!=", by="type", value="NN", name="filter_drop_nn")
 
     MR_FILTER_DROP_ALL = MRFilter(condition= "=", by="type", value="NONE", name="filter_drop_all")
+
+    MR_FILTER_KEEP_NE = MRFilter(condition= "=", by="type", value="NE", name="filter_keep_ne")
+
+    MR_FILTER_KEEP_NN = MRFilter(condition= "=", by="type", value="NN", name="filter_keep_nn")
+
+    MR_FILTER_KEEP_SMR = MRFilter(condition= "=", by="type", value="SMR", name="filter_keep_smr")
 
     MR_FILTER_KEEP_4_10 = create_filter_keep_len_between(4, 10)
 

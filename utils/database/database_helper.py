@@ -366,23 +366,49 @@ class DatabaseHelper():
         print(self.query)
         return self
     
-    def select_bioword_partition(self, joined_mrs_source_table_name, limit=0, row_size_limit=99000000):
-        udf_file_path = os.path.abspath(os.path.join(os.path.dirname( __file__ ), 'bq_udf_compute_partition.sql'))
-        with open(udf_file_path, 'r') as f:
-            udf_query = f.read()
-            
-        query = f'''
-            SELECT
-            joined_patterns.sequence_family_name AS sequence_family_name,
-            family_types.family_type AS sequence_family_type,
-            joined_patterns.sequence_name AS sequence_name,
-            joined_patterns.sequence AS sequence,
-            SUBSTR(ARRAY_TO_STRING(compute_partition(sequence,
-                pattern_positions), " "), 1, {str(row_size_limit)}) as word_partition
-            FROM `{self.BQ_STAGE_DATASET_NAME}.{joined_mrs_source_table_name}` AS joined_patterns
-            INNER JOIN
-                `{self.BQ_INPUT_DATASET_NAME}.{self.family_types_table_name}` as family_types
-            ON joined_patterns.sequence_family_name = family_types.family_name
-            '''
-        self.set_udf_query(udf_query).set_query(query, limit, chain_query=False)
+    def select_bioword_partition(self, joined_mrs_source_table_name, limit=0, row_size_limit=99000000,
+                                metadata_table=None, metadata_join_key=None):
+
+        partition_expr = f'''SUBSTR(
+                CASE
+                WHEN ARRAY_LENGTH(joined_patterns.pattern_positions) = 1
+                    AND ARRAY_LENGTH(joined_patterns.pattern_positions[OFFSET(0)].starting_positions) = 0
+                THEN joined_patterns.sequence
+                ELSE (
+                    SELECT STRING_AGG(pp.pattern, ' ' ORDER BY pos)
+                    FROM UNNEST(joined_patterns.pattern_positions) pp,
+                        UNNEST(pp.starting_positions) pos
+                )
+                END,
+                1,
+                {row_size_limit}) AS word_partition'''
+
+        if metadata_table and metadata_join_key:
+            corpus_join_col, metadata_join_col = metadata_join_key.split(":")
+            query = f'''
+                SELECT
+                joined_patterns.sequence_name AS sequence_name,
+                joined_patterns.sequence AS sequence,
+                {partition_expr},
+                metadata.* EXCEPT({metadata_join_col})
+                FROM `{self.BQ_STAGE_DATASET_NAME}.{joined_mrs_source_table_name}` AS joined_patterns
+                LEFT JOIN
+                    `{self.BQ_INPUT_DATASET_NAME}.{metadata_table}` AS metadata
+                ON joined_patterns.{corpus_join_col} = metadata.{metadata_join_col}
+                '''
+        else:
+            query = f'''
+                SELECT
+                joined_patterns.sequence_family_name AS sequence_family_name,
+                family_types.family_type AS sequence_family_type,
+                joined_patterns.sequence_name AS sequence_name,
+                joined_patterns.sequence AS sequence,
+                {partition_expr}
+                FROM `{self.BQ_STAGE_DATASET_NAME}.{joined_mrs_source_table_name}` AS joined_patterns
+                INNER JOIN
+                    `{self.BQ_INPUT_DATASET_NAME}.{self.family_types_table_name}` AS family_types
+                ON joined_patterns.sequence_family_name = family_types.family_name
+                '''
+
+        self.set_query(query, limit, chain_query=False)
         return self
