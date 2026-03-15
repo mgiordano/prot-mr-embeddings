@@ -129,7 +129,7 @@ def find_vector_files(folder):
         return []
     return sorted(
         f for f in glob.glob(os.path.join(folder, "*.tsv"))
-        if any(t in os.path.basename(f) for t in ("vectors_tsne", "vectors_umap"))
+        if any(t in os.path.basename(f) for t in ("vectors_tsne", "vectors_umap", "vectors_densmap"))
     )
 
 
@@ -581,6 +581,14 @@ main_area = html.Div(style=S_MAIN, children=[
             dcc.Graph(id="hier-plot", config={"scrollZoom": True},
                       style={"height": "680px"}),
         ]),
+        # Click-to-inspect info panel for hierarchy view
+        html.Div(id="hier-click-info", style={
+            "padding": "12px", "margin": "8px 0", "fontSize": "13px",
+            "border": "1px solid #e0e0e0", "borderRadius": "6px",
+            "backgroundColor": "#f9f9f9", "fontFamily": "monospace",
+            "maxHeight": "200px", "overflowY": "auto",
+            "color": "#555",
+        }, children="💡 Click on a point to inspect its metadata."),
     ]),
     # hidden stores
     dcc.Store(id="store-hier-path", data=[]),
@@ -708,6 +716,20 @@ def load_ui_state(ts, store, current_ds):
     if ds and ds != current_ds:
         return ds
     raise PreventUpdate
+
+
+# ── Hide viz-panel immediately when Load Data is clicked ─────────────────────
+app.clientside_callback(
+    """
+    function(n_clicks) {
+        if (!n_clicks) { return window.dash_clientside.no_update; }
+        return {"display": "none"};
+    }
+    """,
+    Output("viz-panel", "style", allow_duplicate=True),
+    Input("btn-load-data", "n_clicks"),
+    prevent_initial_call=True,
+)
 
 
 # ── Load data ─────────────────────────────────────────────────────────────────
@@ -894,6 +916,79 @@ def on_point_click(click_data, loaded):
     for c in meta_cols:
         val = str(row[c])
         # Compute deterministic color for this column's value
+        color = None
+        if c not in _COLORBY_EXCLUDE and _S["df"][c].dtype.name == "category":
+            all_cats = sorted(_S["df"][c].cat.categories)
+            col_colors = _colors_for(all_cats)
+            color = col_colors.get(val)
+        if color:
+            badge = html.Span(val, style={
+                "backgroundColor": color,
+                "color": "white",
+                "padding": "2px 8px",
+                "borderRadius": "10px",
+                "fontSize": "12px",
+                "fontWeight": "600",
+                "textShadow": "0 1px 1px rgba(0,0,0,0.3)",
+                "display": "inline-block",
+            })
+        else:
+            badge = html.Span(val)
+        info_items.append(html.Div([
+            html.Span(f"{c}: ", style={"fontWeight": "bold", "color": "#555",
+                                        "marginRight": "4px", "fontSize": "12px"}),
+            badge,
+        ], style={"marginBottom": "3px"}))
+    return html.Div([
+        html.Div("📍 Point Metadata", style={"fontWeight": "bold", "marginBottom": "6px",
+                                              "color": "#4363d8", "fontFamily": "Arial"}),
+    ] + info_items)
+
+
+# ── Click-to-inspect metadata for hierarchy plot ─────────────────────────────
+@app.callback(
+    Output("hier-click-info", "children"),
+    Input("hier-plot", "clickData"),
+    State("store-data-loaded", "data"),
+    State("store-hier-path", "data"),
+    prevent_initial_call=True,
+)
+def on_hier_point_click(click_data, loaded, path_json):
+    """Display full metadata for the clicked point in the hierarchy view."""
+    if not loaded or _S["df"] is None or not click_data:
+        raise PreventUpdate
+    pt = click_data["points"][0]
+    trace_idx = pt.get("curveNumber", 0)
+    point_idx = pt.get("pointIndex", 0)
+
+    # Resolve back to original df row
+    idx_map = _S.get("trace_index_map")
+    if idx_map is not None and trace_idx < len(idx_map):
+        orig_idx = idx_map[trace_idx][point_idx]
+        row = _S["df"].iloc[orig_idx] if orig_idx < len(_S["df"]) else None
+    else:
+        # Fallback: find closest point by coordinates
+        x_click, y_click = pt.get("x"), pt.get("y")
+        if x_click is None or y_click is None:
+            raise PreventUpdate
+        # Apply the same hierarchy filter to search within the correct subset
+        filt = _S["df"]
+        path_list = path_json if path_json else []
+        for c, v in path_list:
+            filt = filt[filt[c] == v]
+        dist = ((filt["reduced_vector_d1"] - x_click) ** 2 +
+                (filt["reduced_vector_d2"] - y_click) ** 2)
+        orig_idx = dist.idxmin()
+        row = _S["df"].iloc[orig_idx]
+
+    if row is None:
+        raise PreventUpdate
+
+    # Build info display with colored pill badges
+    meta_cols = [c for c in _S["df"].columns if c not in INTERNAL_COLS]
+    info_items = []
+    for c in meta_cols:
+        val = str(row[c])
         color = None
         if c not in _COLORBY_EXCLUDE and _S["df"][c].dtype.name == "category":
             all_cats = sorted(_S["df"][c].cat.categories)
