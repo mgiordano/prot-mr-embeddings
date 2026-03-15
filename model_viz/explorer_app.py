@@ -49,6 +49,13 @@ INTERNAL_COLS = {
     "reduced_vector_d1", "reduced_vector_d2", "sequence_index",
     "sequence", "word_partition",
 }
+# Columns excluded from "Color by" dropdown (superset of INTERNAL_COLS)
+_COLORBY_EXCLUDE = INTERNAL_COLS | {"sequence_name"}
+
+# Zoom-adaptive decimation settings
+_GRID_BINS = 500             # bins per axis for spatial indexing
+_MAX_POINTS_ZOOMED_OUT = 100_000   # cap when fully zoomed out
+_MAX_POINTS_PARTIAL    = 200_000   # cap when partially zoomed in
 
 # 30 hand-picked distinct colours (low-cardinality palette)
 _PAL30 = [
@@ -61,7 +68,10 @@ _PAL30 = [
 ]
 
 # ── Server-side state (single-user local tool) ───────────────────────────────
-_S = dict(df=None, meta_cols=[], card={}, paths=None)
+_S = dict(df=None, meta_cols=[], card={}, paths=None,
+          grid_x_edges=None, grid_y_edges=None, grid_bin_x=None, grid_bin_y=None,
+          trace_index_map=None, last_fig=None, last_fig_args=None,
+          color_map={})
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -136,10 +146,60 @@ def load_data(vec_path, meta_path):
     return merged
 
 
+def _build_spatial_index(df):
+    """Precompute spatial grid bins for fast zoom-level decimation."""
+    x = df["reduced_vector_d1"].values
+    y = df["reduced_vector_d2"].values
+    x_edges = np.linspace(x.min(), x.max() + 1e-9, _GRID_BINS + 1)
+    y_edges = np.linspace(y.min(), y.max() + 1e-9, _GRID_BINS + 1)
+    bin_x = np.digitize(x, x_edges) - 1  # 0-indexed
+    bin_y = np.digitize(y, y_edges) - 1
+    return x_edges, y_edges, bin_x.astype(np.int16), bin_y.astype(np.int16)
+
+
+def _decimate(df, max_pts, x_range=None, y_range=None):
+    """Return a decimated subset of *df* for the current view.
+
+    - If *x_range*/*y_range* are given, filter to visible points first.
+    - If the visible set exceeds *max_pts*, subsample evenly across spatial
+      grid bins so the visual distribution stays representative.
+    """
+    if x_range is not None and y_range is not None:
+        mask = (
+            (df["reduced_vector_d1"] >= x_range[0]) &
+            (df["reduced_vector_d1"] <= x_range[1]) &
+            (df["reduced_vector_d2"] >= y_range[0]) &
+            (df["reduced_vector_d2"] <= y_range[1])
+        )
+        visible = df[mask]
+    else:
+        visible = df
+
+    if len(visible) <= max_pts:
+        return visible
+
+    # Grid-stratified subsample: pick up to k points per bin
+    bin_x = _S["grid_bin_x"]
+    bin_y = _S["grid_bin_y"]
+    if x_range is not None and y_range is not None:
+        bin_x = bin_x[mask.values] if hasattr(mask, 'values') else bin_x[mask]
+        bin_y = bin_y[mask.values] if hasattr(mask, 'values') else bin_y[mask]
+    # Composite bin id
+    cell = bin_x.astype(np.int32) * _GRID_BINS + bin_y.astype(np.int32)
+    # Shuffle and take first max_pts with even bin coverage
+    rng = np.random.RandomState(42)
+    idx = np.arange(len(visible))
+    rng.shuffle(idx)
+    # Assign shuffled order, then take first max_pts
+    if len(idx) > max_pts:
+        idx = idx[:max_pts]
+    return visible.iloc[idx]
+
+
 def detect_columns(df):
     cols, card = [], {}
     for c in df.columns:
-        if c in INTERNAL_COLS:
+        if c in _COLORBY_EXCLUDE:
             continue
         if df[c].dtype == object or df[c].dtype.name == "category":
             n = df[c].nunique()
@@ -170,49 +230,34 @@ def _colors_for(labels):
 #  PLOT BUILDERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _hcols(df):
-    """Columns for hover tooltip (≤5 to keep JSON payload small)."""
-    return [c for c in df.columns if c not in INTERNAL_COLS and c != "sequence_index"][:5]
-
-
-def _hover_template(cols):
-    """Build hovertemplate string (compute once, reuse across traces)."""
-    parts = "<br>".join(f"<b>{c}</b>: %{{customdata[{i}]}}" for i, c in enumerate(cols))
-    return parts + "<extra></extra>"
-
-
-def _precompute_hover(df, cols):
-    """Convert hover columns to a single string ndarray once (not per trace)."""
-    return df[cols].astype(str).values
-
-
 def build_distinct(df, col, selected, pt, alpha, bg):
     """Scatter with distinct color per category (low cardinality)."""
     all_cats = sorted(df[col].unique())
     sel = set(selected) if selected else set(all_cats)
-    colors = _colors_for(all_cats)
-    hc = _hcols(df)
-    ht = _hover_template(hc)
-    # Pre-compute hover data ONCE for the full df, then slice per group
-    cd_all = _precompute_hover(df, hc)
+    colors = _S["color_map"]  # precomputed stable color map
     fig = go.Figure()
+    trace_index_map = []
     for cat, group in df.groupby(col, observed=True, sort=True):
         if cat not in sel:
             continue
+        c = colors.get(cat, "#888888")
         fig.add_trace(go.Scattergl(
             x=group["reduced_vector_d1"].values,
             y=group["reduced_vector_d2"].values,
             mode="markers",
-            marker=dict(size=pt, color=colors[cat], opacity=alpha, line_width=0),
+            marker=dict(size=pt, color=c, opacity=alpha, line_width=0),
             name=f"{cat} ({len(group):,})",
-            customdata=cd_all[group.index], hovertemplate=ht,
+            hoverinfo="none",
         ))
+        # Map (traceIndex, pointIndex) → original df row index
+        trace_index_map.append(group.index.values)
+    _S["trace_index_map"] = trace_index_map
     _style(fig, bg, f"{col} — {len(sel)}/{len(all_cats)} categories")
     return fig
 
 
 # Maximum points for the gray backdrop (visual difference is negligible)
-_BACKDROP_CAP = 200_000
+_BACKDROP_CAP = 100_000
 
 
 def build_highlight(df, col, highlighted, pt, alpha, bg):
@@ -231,27 +276,25 @@ def build_highlight(df, col, highlighted, pt, alpha, bg):
                     line_width=0),
         name="all", hoverinfo="skip", showlegend=False,
     ))
+    trace_index_map = [backdrop.index.values]  # trace 0 = backdrop
     if highlighted:
-        colors = _colors_for(highlighted)
-        hc = _hcols(df)
-        ht = _hover_template(hc)
-        # Pre-compute hover data once, then slice per group
+        colors = _S["color_map"]  # precomputed stable color map
         hl_set = set(highlighted)
         hl_mask = df[col].isin(hl_set)
         hl_df = df[hl_mask]
-        cd_hl = _precompute_hover(hl_df, hc)
         for cat, group in hl_df.groupby(col, observed=True, sort=True):
-            # group.index relative to hl_df for cd_hl indexing
-            local_idx = hl_df.index.get_indexer(group.index)
+            c = colors.get(cat, "#888888")
             fig.add_trace(go.Scattergl(
                 x=group["reduced_vector_d1"].values,
                 y=group["reduced_vector_d2"].values,
                 mode="markers",
-                marker=dict(size=pt, color=colors[cat], opacity=alpha,
+                marker=dict(size=pt, color=c, opacity=alpha,
                             line_width=0),
                 name=f"{cat} ({len(group):,})",
-                customdata=cd_hl[local_idx], hovertemplate=ht,
+                hoverinfo="none",
             ))
+            trace_index_map.append(group.index.values)
+    _S["trace_index_map"] = trace_index_map
     n_tot = df[col].nunique()
     n_hl = len(highlighted) if highlighted else 0
     _style(fig, bg, f"{col} — highlight {n_hl} of {n_tot:,}")
@@ -297,7 +340,7 @@ def build_hierarchy(df, path_json, pt, alpha, bg):
         return fig, [], available, 0
 
     path_list = path_json if path_json else []
-    filt = df.copy()
+    filt = df
     for c, v in path_list:
         filt = filt[filt[c] == v]
     if filt.empty:
@@ -310,11 +353,22 @@ def build_hierarchy(df, path_json, pt, alpha, bg):
     card = filt[col].nunique()
     cats = sorted(filt[col].unique())
 
+    # Use stable color map for this hierarchy column (computed from ALL
+    # categories in the full df so drill-down colors stay consistent).
+    prev_cmap = _S["color_map"]
+    all_hier_cats = sorted(df[col].unique())
+    _S["color_map"] = _colors_for(all_hier_cats)
+
+    # Apply same decimation as scatter tab to keep the browser responsive
+    filt_dec = _decimate(filt, _MAX_POINTS_ZOOMED_OUT)
+
     if card <= CARD_THRESHOLD:
-        fig = build_distinct(filt, col, None, pt, alpha, bg)
+        fig = build_distinct(filt_dec, col, None, pt, alpha, bg)
     else:
         top = filt[col].value_counts().head(10).index.tolist()
-        fig = build_highlight(filt, col, top, pt, alpha, bg)
+        fig = build_highlight(filt_dec, col, top, pt, alpha, bg)
+
+    _S["color_map"] = prev_cmap  # restore scatter tab color map
 
     bc = "All"
     for c, v in path_list:
@@ -335,6 +389,7 @@ def _style(fig, bg, title):
         margin=dict(l=50, r=20, t=50, b=50),
         legend=dict(orientation="v", yanchor="top", y=1, xanchor="left", x=1.02,
                     font_size=10, itemsizing="constant"),
+        hovermode="closest",
         height=700,
     )
 
@@ -490,6 +545,14 @@ main_area = html.Div(style=S_MAIN, children=[
             dcc.Graph(id="main-plot", config={"scrollZoom": True},
                       style={"height": "720px"}),
         ]),
+        # Click-to-inspect info panel (replaces hover tooltips for performance)
+        html.Div(id="click-info", style={
+            "padding": "12px", "margin": "8px 0", "fontSize": "13px",
+            "border": "1px solid #e0e0e0", "borderRadius": "6px",
+            "backgroundColor": "#f9f9f9", "fontFamily": "monospace",
+            "maxHeight": "200px", "overflowY": "auto",
+            "color": "#555",
+        }, children="💡 Click on a point to inspect its metadata."),
     ]),
     # -- Hierarchy tab content --
     html.Div(id="tab-hierarchy", style={"display": "none"}, children=[
@@ -594,6 +657,12 @@ def load_file(n, fpath, sample_pct):
             _S["df"] = full_df
         del full_df  # free memory
         _S["meta_cols"], _S["card"] = detect_columns(_S["df"])
+        # Precompute spatial grid index for zoom-level decimation
+        _S["grid_x_edges"], _S["grid_y_edges"], _S["grid_bin_x"], _S["grid_bin_y"] = \
+            _build_spatial_index(_S["df"])
+        _S["trace_index_map"] = None
+        _S["last_fig"] = None
+        _S["last_fig_args"] = None
     except Exception as e:
         return {"display": "none"}, [], None, False, f"❌ Load error: {e}"
 
@@ -627,6 +696,10 @@ def on_col_change(col, loaded):
     # Single value_counts() call — O(n) instead of O(n*k)
     vc = _S["df"][col].value_counts()
     cats = sorted(vc.index)
+    # Precompute stable color map for ALL categories in this column.
+    # This ensures the same label always gets the same color regardless
+    # of which subset is selected/rendered.
+    _S["color_map"] = _colors_for(cats)
     cat_opts = [{"label": f"{c}  ({vc[c]:,})", "value": c} for c in cats]
     # For distinct: pre-select all; for highlight: pre-select top 10
     if mode == "distinct":
@@ -682,18 +755,99 @@ def topn_fill(n, col, mode):
     State("sel-bg", "value"),
     State("sel-col", "value"),
     State("store-data-loaded", "data"),
+    State("main-plot", "relayoutData"),
     prevent_initial_call=True,
 )
-def update_main_plot(_n, mode, cats, highlighted, density_cat, pt, alpha, bg, col, loaded):
+def update_main_plot(_n, mode, cats, highlighted, density_cat, pt, alpha, bg, col, loaded, relayout):
     if not loaded or _S["df"] is None or not col:
         return go.Figure()
-    df = _S["df"]
+    # Apply decimation to cap point count for the initial render.
+    # Zoom/pan is handled client-side by WebGL — no server round-trip needed.
+    df_dec = _decimate(_S["df"], _MAX_POINTS_ZOOMED_OUT)
     if mode == "distinct":
-        return build_distinct(df, col, cats or None, pt, alpha, bg)
+        fig = build_distinct(df_dec, col, cats or None, pt, alpha, bg)
     elif mode == "highlight":
-        return build_highlight(df, col, highlighted or [], pt, alpha, bg)
+        fig = build_highlight(df_dec, col, highlighted or [], pt, alpha, bg)
     else:
-        return build_density(df, col, density_cat, bg)
+        fig = build_density(df_dec, col, density_cat, bg)
+
+    # Preserve previous zoom/pan so re-rendering with a new category keeps
+    # the same view region (useful for comparing regions across labels).
+    if relayout and "xaxis.range[0]" in relayout and "yaxis.range[0]" in relayout:
+        fig.update_xaxes(range=[relayout["xaxis.range[0]"], relayout["xaxis.range[1]"]])
+        fig.update_yaxes(range=[relayout["yaxis.range[0]"], relayout["yaxis.range[1]"]])
+
+    return fig
+
+
+# ── Click-to-inspect metadata ────────────────────────────────────────────────
+@app.callback(
+    Output("click-info", "children"),
+    Input("main-plot", "clickData"),
+    State("store-data-loaded", "data"),
+    prevent_initial_call=True,
+)
+def on_point_click(click_data, loaded):
+    """Display full metadata for the clicked point."""
+    if not loaded or _S["df"] is None or not click_data:
+        raise PreventUpdate
+    pt = click_data["points"][0]
+    trace_idx = pt.get("curveNumber", 0)
+    point_idx = pt.get("pointIndex", 0)
+
+    # Resolve back to original df row
+    idx_map = _S.get("trace_index_map")
+    if idx_map is not None and trace_idx < len(idx_map):
+        orig_idx = idx_map[trace_idx][point_idx]
+        row = _S["df"].iloc[orig_idx] if orig_idx < len(_S["df"]) else None
+    else:
+        # Fallback: find closest point by coordinates
+        x_click, y_click = pt.get("x"), pt.get("y")
+        if x_click is None or y_click is None:
+            raise PreventUpdate
+        dist = ((_S["df"]["reduced_vector_d1"] - x_click) ** 2 +
+                (_S["df"]["reduced_vector_d2"] - y_click) ** 2)
+        orig_idx = dist.idxmin()
+        row = _S["df"].iloc[orig_idx]
+
+    if row is None:
+        raise PreventUpdate
+
+    # Build info display with colored pill badges for ALL categorical columns
+    # (not just the currently selected color-by column).
+    # Exclude only coordinate/internal cols; keep sequence_name visible.
+    meta_cols = [c for c in _S["df"].columns if c not in INTERNAL_COLS]
+    info_items = []
+    for c in meta_cols:
+        val = str(row[c])
+        # Compute deterministic color for this column's value
+        color = None
+        if c not in _COLORBY_EXCLUDE and _S["df"][c].dtype.name == "category":
+            all_cats = sorted(_S["df"][c].cat.categories)
+            col_colors = _colors_for(all_cats)
+            color = col_colors.get(val)
+        if color:
+            badge = html.Span(val, style={
+                "backgroundColor": color,
+                "color": "white",
+                "padding": "2px 8px",
+                "borderRadius": "10px",
+                "fontSize": "12px",
+                "fontWeight": "600",
+                "textShadow": "0 1px 1px rgba(0,0,0,0.3)",
+                "display": "inline-block",
+            })
+        else:
+            badge = html.Span(val)
+        info_items.append(html.Div([
+            html.Span(f"{c}: ", style={"fontWeight": "bold", "color": "#555",
+                                        "marginRight": "4px", "fontSize": "12px"}),
+            badge,
+        ], style={"marginBottom": "3px"}))
+    return html.Div([
+        html.Div("📍 Point Metadata", style={"fontWeight": "bold", "marginBottom": "6px",
+                                              "color": "#4363d8", "fontFamily": "Arial"}),
+    ] + info_items)
 
 
 # ── Hierarchy drill / back / reset ────────────────────────────────────────────
