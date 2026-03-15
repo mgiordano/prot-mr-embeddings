@@ -78,45 +78,50 @@ _S = dict(df=None, meta_cols=[], card={}, paths=None,
 #  DATA HELPERS
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _opt(cls, prefix=""):
-    """Build Dash dropdown options from a constants class."""
-    return [{"label": k, "value": k}
-            for k in sorted(dir(cls)) if not k.startswith("_") and (not prefix or k.startswith(prefix))]
+def get_available_datasets():
+    if not INPUT_DATA_ROOT_PATH or not os.path.exists(INPUT_DATA_ROOT_PATH):
+        return []
+    # Datasets are directories in the root path
+    return sorted([d for d in os.listdir(INPUT_DATA_ROOT_PATH)
+                   if os.path.isdir(os.path.join(INPUT_DATA_ROOT_PATH, d))])
 
 
-def construct_paths(ts, ds_key, filt_key, part_key, exp, combined):
-    fds = getattr(dataset_names, ds_key)
-    fn = getattr(filters, filt_key).name
-    pn = getattr(partition_rules, part_key)["name"]
-    date = corpus_utils.get_date_from_formatted_ts(ts)
-    vof = os.path.join(INPUT_DATA_ROOT_PATH, fds, date, "vector_output")
-    rid = f"{ts}-{fds}-{fn}-{pn}"
-    mf = f"{rid}-combined-metadata.tsv" if combined else f"{rid}-metadata.tsv"
-    ef = f"{exp}-combined" if combined else exp
+def get_available_dates(dataset):
+    if not dataset:
+        return []
+    ds_path = os.path.join(INPUT_DATA_ROOT_PATH, dataset)
+    if not os.path.exists(ds_path):
+        return []
+    # Dates are usually YYYYMMDD folders inside the dataset
+    return sorted([d for d in os.listdir(ds_path)
+                   if os.path.isdir(os.path.join(ds_path, d)) and d.isdigit()], reverse=True)
 
-    # When model_dim_reduction was run with --filter-col the experiment folder
-    # gets a "-filtered" suffix and a dedicated metadata file is saved next to
-    # the original.  Detect this and swap to the filtered metadata so that row
-    # indices stay aligned with the filtered vectors.
-    if ef.endswith("-filtered"):
-        if "-cross-filtered" in ef:
-            # Cross-model filtered: metadata is <rid>-cross_<tag>-filtered-metadata.tsv.
-            # Tag is unknown here, so use a glob to find the file.
-            pattern = os.path.join(vof, f"{rid}-cross_*-filtered-metadata.tsv")
-            matches = glob.glob(pattern)
-            if matches:
-                mf = os.path.basename(matches[0])
-        elif combined:
-            mf = f"{rid}-combined-filtered-metadata.tsv"
-        else:
-            mf = f"{rid}-filtered-metadata.tsv"
 
-    return dict(
-        metadata=os.path.join(vof, mf),
-        exp_folder=os.path.join(vof, "experiments", ef),
-        charts=os.path.join(vof, "experiments", ef, "charts"),
-        run_id=rid,
-    )
+def get_available_runs(dataset, date):
+    if not dataset or not date:
+        return []
+    vo_path = os.path.join(INPUT_DATA_ROOT_PATH, dataset, date, "vector_output")
+    if not os.path.exists(vo_path):
+        return []
+    runs = set()
+    # Find all metadata files to identify runs
+    for f in glob.glob(os.path.join(vo_path, "*-metadata.tsv")):
+        bn = os.path.basename(f)
+        # remove "-metadata.tsv" or "-filtered-metadata.tsv"
+        run_id = bn.replace("-metadata.tsv", "").replace("-filtered", "").replace("-combined", "")
+        runs.add(run_id)
+    return sorted(list(runs), reverse=True)
+
+
+def get_available_experiments(dataset, date):
+    if not dataset or not date:
+        return []
+    exp_path = os.path.join(INPUT_DATA_ROOT_PATH, dataset, date, "vector_output", "experiments")
+    if not os.path.exists(exp_path):
+        return []
+    return sorted([d for d in os.listdir(exp_path)
+                   if os.path.isdir(os.path.join(exp_path, d))], reverse=True)
+
 
 
 def find_vector_files(folder):
@@ -409,11 +414,7 @@ def _apply_bg(fig, bg):
 #  DASH LAYOUT
 # ══════════════════════════════════════════════════════════════════════════════
 
-_ds_opts = _opt(dataset_names)
-_fi_opts = [{"label": k, "value": k} for k in sorted(dir(filters))
-            if not k.startswith("_") and k.startswith("MR_")]
-_pa_opts = [{"label": k, "value": k} for k in sorted(dir(partition_rules))
-            if not k.startswith("_") and k.startswith("PARTITION_")]
+_ds_opts = [{"label": d, "value": d} for d in get_available_datasets()]
 
 # CSS tokens
 S_SIDEBAR = {"width": "330px", "minWidth": "330px", "padding": "16px",
@@ -441,30 +442,30 @@ app.title = "Protein Embedding Explorer"
 sidebar = html.Div(style=S_SIDEBAR, children=[
     html.H3("🧬 Explorer", style={"margin": "0 0 16px 0", "color": "#333"}),
 
+    # UI State Persistence
+    dcc.Store(id="store-ui-state", storage_type="local", data={}),
+
     # ── Experiment ──
     html.Div(style=S_CARD, children=[
         html.Span("EXPERIMENT", style=S_HDR),
-        html.Label("Timestamp", style=S_LBL),
-        dcc.Input(id="inp-ts", type="text", placeholder="20241125_102030", style=S_INPUT),
+        
         html.Label("Dataset", style=S_LBL),
-        dcc.Dropdown(id="sel-ds", options=_ds_opts,
-                     value=_ds_opts[0]["value"] if _ds_opts else None),
-        html.Label("MR Filter", style={**S_LBL, "marginTop": "8px"}),
-        dcc.Dropdown(id="sel-filt", options=_fi_opts,
-                     value="MR_FILTER_NONE" if any(o["value"] == "MR_FILTER_NONE" for o in _fi_opts) else None),
-        html.Label("Partition Rule", style={**S_LBL, "marginTop": "8px"}),
-        dcc.Dropdown(id="sel-part", options=_pa_opts,
-                     value="PARTITION_RULE_USE_ALL" if any(o["value"] == "PARTITION_RULE_USE_ALL" for o in _pa_opts) else None),
-        html.Label("Experiment Name", style={**S_LBL, "marginTop": "8px"}),
-        dcc.Input(id="inp-exp", type="text", placeholder="tsne_experiment", style=S_INPUT),
-        dcc.Checklist(id="chk-comb", options=[{"label": " Combined (with control)", "value": "yes"}], value=[]),
-        html.Button("Load Experiment", id="btn-load-exp", style=S_BTN),
+        dcc.Dropdown(id="sel-dataset", options=_ds_opts, placeholder="Select dataset…"),
+        
+        html.Label("Date", style={**S_LBL, "marginTop": "8px"}),
+        dcc.Dropdown(id="sel-date", options=[], placeholder="Select date…"),
+
+        html.Label("Run (Timestamp - Filter - Partition)", style={**S_LBL, "marginTop": "8px"}),
+        dcc.Dropdown(id="sel-run", options=[], placeholder="Select run…"),
+
+        html.Label("Experiment", style={**S_LBL, "marginTop": "8px"}),
+        dcc.Dropdown(id="sel-experiment", options=[], placeholder="Select experiment…"),
     ]),
 
     # ── File ──
     html.Div(style=S_CARD, children=[
         html.Span("FILE", style=S_HDR),
-        dcc.Dropdown(id="sel-file", options=[], placeholder="Load experiment first…"),
+        dcc.Dropdown(id="sel-file", options=[], placeholder="Select file…"),
         html.Label("Sample %", style={**S_LBL, "marginTop": "8px"}),
         dcc.Slider(id="sld-sample", min=10, max=100, step=5, value=100,
                    marks={10: "10%", 25: "25%", 50: "50%", 75: "75%", 100: "100%"},
@@ -603,32 +604,107 @@ def toggle_tabs(tab):
     return (show, hide) if tab == "scatter" else (hide, show)
 
 
-# ── Load experiment ───────────────────────────────────────────────────────────
+# ── Cascading UI Callbacks ────────────────────────────────────────────────────
+
+@app.callback(
+    Output("sel-date", "options"),
+    Output("sel-date", "value"),
+    Input("sel-dataset", "value"),
+)
+def update_dates(dataset):
+    dates = get_available_dates(dataset)
+    opts = [{"label": d, "value": d} for d in dates]
+    return opts, dates[0] if dates else None
+
+
+@app.callback(
+    Output("sel-run", "options"),
+    Output("sel-run", "value"),
+    Output("sel-experiment", "options"),
+    Output("sel-experiment", "value"),
+    Input("sel-date", "value"),
+    State("sel-dataset", "value"),
+)
+def update_runs_and_exps(date, dataset):
+    runs = get_available_runs(dataset, date)
+    exps = get_available_experiments(dataset, date)
+    r_opts = [{"label": r, "value": r} for r in runs]
+    e_opts = [{"label": e, "value": e} for e in exps]
+    return (r_opts, runs[0] if runs else None,
+            e_opts, exps[0] if exps else None)
+
+
 @app.callback(
     Output("sel-file", "options"),
     Output("sel-file", "value"),
     Output("status-box", "children", allow_duplicate=True),
-    Input("btn-load-exp", "n_clicks"),
-    State("inp-ts", "value"), State("sel-ds", "value"),
-    State("sel-filt", "value"), State("sel-part", "value"),
-    State("inp-exp", "value"), State("chk-comb", "value"),
+    Input("sel-run", "value"),
+    Input("sel-experiment", "value"),
+    State("sel-date", "value"),
+    State("sel-dataset", "value"),
     prevent_initial_call=True,
 )
-def load_experiment(n, ts, ds_key, filt, part, exp, comb):
-    if not ts or not exp:
-        return [], None, "⚠️ Enter timestamp and experiment name."
-    try:
-        paths = construct_paths(ts.strip(), ds_key, filt, part, exp.strip(), "yes" in comb)
-    except Exception as e:
-        return [], None, f"❌ {e}"
-    _S["paths"] = paths
-    if not os.path.isfile(paths["metadata"]):
-        return [], None, f"❌ Metadata not found: {paths['metadata']}"
-    files = find_vector_files(paths["exp_folder"])
+def update_files(run, exp, date, dataset):
+    if not all([dataset, date, run, exp]):
+        return [], None, "⏳ Select dataset, date, run, and experiment."
+    
+    exp_folder = os.path.join(INPUT_DATA_ROOT_PATH, dataset, date, "vector_output", "experiments", exp)
+    files = find_vector_files(exp_folder)
     if not files:
-        return [], None, f"❌ No vector files in {paths['exp_folder']}"
+        return [], None, f"❌ No vector files in experiment '{exp}'"
+    
+    # Store the exact paths needed by load_data in _S
+    # Determine the correct metadata file (handling -filtered suffix)
+    vof = os.path.join(INPUT_DATA_ROOT_PATH, dataset, date, "vector_output")
+    mf = f"{run}-metadata.tsv"
+    if exp.endswith("-filtered"):
+        mf = f"{run}-filtered-metadata.tsv"
+    
+    _S["paths"] = dict(
+        metadata=os.path.join(vof, mf),
+        exp_folder=exp_folder
+    )
+    
     opts = [{"label": os.path.basename(f), "value": f} for f in files]
-    return opts, files[0], f"✅ Found {len(files)} vector files."
+    return opts, files[0], f"✅ Select file and click Load Data."
+
+
+# ── UI State Persistence ──────────────────────────────────────────────────────
+
+@app.callback(
+    Output("store-ui-state", "data"),
+    Input("sel-dataset", "value"),
+    Input("sel-date", "value"),
+    Input("sel-run", "value"),
+    Input("sel-experiment", "value"),
+    Input("sel-file", "value"),
+    State("store-ui-state", "data"),
+    prevent_initial_call=True,
+)
+def save_ui_state(ds, dt, run, exp, file, store):
+    # Only save if we have values (avoids overwriting on initial clear)
+    store = store or {}
+    if ctx.triggered_id == "sel-dataset" and ds: store["dataset"] = ds
+    if ctx.triggered_id == "sel-date" and dt: store["date"] = dt
+    if ctx.triggered_id == "sel-run" and run: store["run"] = run
+    if ctx.triggered_id == "sel-experiment" and exp: store["experiment"] = exp
+    if ctx.triggered_id == "sel-file" and file: store["file"] = file
+    return store
+
+
+@app.callback(
+    Output("sel-dataset", "value"),
+    Input("store-ui-state", "modified_timestamp"),
+    State("store-ui-state", "data"),
+    State("sel-dataset", "value"),
+)
+def load_ui_state(ts, store, current_ds):
+    if ts is None or store is None:
+        raise PreventUpdate
+    ds = store.get("dataset")
+    if ds and ds != current_ds:
+        return ds
+    raise PreventUpdate
 
 
 # ── Load data ─────────────────────────────────────────────────────────────────
