@@ -23,3 +23,6 @@ opentsne
 umap-learn
 colorcet
 ipywidgets
+dash
+plotly
+kaleido

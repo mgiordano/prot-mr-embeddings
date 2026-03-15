@@ -92,14 +92,22 @@ def load_model(model_path: str, use_mmap: bool = False):
 
 #@task(log_prints=True)
 def create_and_save_metadata(corpus_df, filename_prefix, parent_folder_path, is_control=False):
-    """Extract metadata creation and saving logic into a reusable function"""
+    """Extract metadata creation and saving logic into a reusable function.
+    
+    Dynamically selects all columns except internal/computed ones (word_partition, bio_vector)
+    so it works with both original corpus format (family_name, family_type) and
+    metadata-override format (superfamily, cath_class, etc.).
+    """
     logging.info("START TASK -  save metadata.tsv")
-    # save metadata tsv
-    metadata_df = corpus_df[["sequence", "sequence_name", "sequence_family_name", "sequence_family_type"]].copy()
+    # save metadata tsv — use all columns except internal/computed ones
+    exclude_columns = {"word_partition", "bio_vector"}
+    metadata_columns = [col for col in corpus_df.columns if col not in exclude_columns]
+    metadata_df = corpus_df[metadata_columns].copy()
 
     # For control datasets, set sequence_family_type to "control" and add partition_type column
     if is_control:
-        metadata_df["sequence_family_type"] = "control"
+        if "sequence_family_type" in metadata_df.columns:
+            metadata_df["sequence_family_type"] = "control"
         # Add partition_type column based on word_partition content
         if "word_partition" in corpus_df.columns:
             metadata_df["partition_type"] = np.where(corpus_df["word_partition"] == "", "sequence", "mr")
@@ -116,7 +124,9 @@ def create_and_save_metadata(corpus_df, filename_prefix, parent_folder_path, is_
 # #######################################
 
 #@flow(name="Create Protein Embeddings", log_prints=True)
-def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column, is_control=False, use_mmap=False, metadata_only=False):
+def create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, bioword_rule_column, is_control=False, use_mmap=False, metadata_only=False,
+                              cross_model_dataset_name=None, cross_model_timestamp=None, cross_model_filter_name=None, cross_model_partition_rule_name=None, cross_model_tag=None):
+    is_cross = cross_model_tag is not None
     if metadata_only:
         logging.info("START FLOW ******************* Create Metadata Only *******************")
     else:
@@ -129,7 +139,12 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
 
     # Determine filename prefix based on whether this is control data
     filename_prefix_base = timestamp+"-"+family_dataset_name+"-"+filter_name+"-"+partition_rule_name
-    filename_prefix = filename_prefix_base + "-control" if is_control else filename_prefix_base
+    if is_cross:
+        filename_prefix = filename_prefix_base + f"-cross_{cross_model_tag}"
+    elif is_control:
+        filename_prefix = filename_prefix_base + "-control"
+    else:
+        filename_prefix = filename_prefix_base
 
     # Load evaluation corpus export (bioword partition with seq info and labels)
     corpus_path = get_corpus_eval_file_path_from_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name, is_control)
@@ -155,7 +170,13 @@ def create_protein_embeddings(input_data_root_path, family_dataset_name, timesta
         return
 
     # Load FastText trained model (only needed for vector processing)
-    model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
+    if is_cross:
+        model_path = corpus_prep_utils.get_model_path_by_run(
+            input_data_root_path, cross_model_dataset_name, cross_model_timestamp,
+            cross_model_filter_name, cross_model_partition_rule_name)
+        logging.info(f"Cross-model mode: loading model from {model_path}")
+    else:
+        model_path = corpus_prep_utils.get_model_path_by_run(input_data_root_path, family_dataset_name, timestamp, filter_name, partition_rule_name)
     model = load_model(model_path, use_mmap)
     
     # Compute vector representation for sequence bioword representation
@@ -225,8 +246,26 @@ if __name__=="__main__":
     parser.add_argument('--metadata', 
                         action='store_true',
                         help='Create metadata only')
+
+    # --- Cross-model arguments (optional) ---
+    cross = parser.add_argument_group('cross-model (use a model trained on a different dataset)')
+    cross.add_argument('--cross', action='store_true',
+                       help='Enable cross-model mode: use a model from a different run')
+    cross.add_argument('--model_timestamp',      help='Run timestamp of the model to load')
+    cross.add_argument('--model_dataset_name',   help='Dataset name the model was trained on')
+    cross.add_argument('--model_filter',         help='MR filter used during model training')
+    cross.add_argument('--model_partition_rule', help='MR partition rule used during model training')
+    cross.add_argument('--model_tag',            help='Short label for output filenames (e.g. bsc, family200)')
+
     # Parse arguments
     args = parser.parse_args()
+
+    # Validate cross-model arguments
+    if args.cross:
+        cross_required = ['model_timestamp', 'model_dataset_name', 'model_filter', 'model_partition_rule', 'model_tag']
+        missing = [f'--{a}' for a in cross_required if getattr(args, a) is None]
+        if missing:
+            parser.error(f"--cross requires: {', '.join(missing)}")
 
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
@@ -238,7 +277,19 @@ if __name__=="__main__":
     
     # model embedding column
     bioword_rule_column = bioword_rules.BIOWORD_RULE_PARTITION_COLUMN
-    
+
+    # Resolve cross-model parameters if applicable
+    cross_kwargs = {}
+    if args.cross:
+        cross_kwargs = dict(
+            cross_model_dataset_name=getattr(dataset_names, args.model_dataset_name),
+            cross_model_timestamp=args.model_timestamp,
+            cross_model_filter_name=getattr(filters, args.model_filter).name,
+            cross_model_partition_rule_name=getattr(partition_rules, args.model_partition_rule)["name"],
+            cross_model_tag=args.model_tag,
+        )
+
     # with tags("eval"):
     create_protein_embeddings(input_data_root_path, family_dataset_name, timestamp, 
-                filter_name, partition_rule_name, bioword_rule_column, args.control, args.mmap, args.metadata)
+                filter_name, partition_rule_name, bioword_rule_column, args.control, args.mmap, args.metadata,
+                **cross_kwargs)

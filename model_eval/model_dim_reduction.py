@@ -144,26 +144,45 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"
     return reduced_vectors
 
 #@flow(name="Reduce embedding dimensions", log_prints=True)
-def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, use_combined=False):
-    """Reduce the dimensionality of the embedding vectors using t-SNE+PCA or UMAP"""
+def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters,
+                                use_combined=False, cross_model_tag=None):
+    """Reduce the dimensionality of the embedding vectors using t-SNE+PCA or UMAP.
 
-    # Determine input filename based on whether we're using combined data
-    if use_combined:
+    Args:
+        use_combined:    Load the combined (original + control) vectors file.
+        cross_model_tag: When set, load the cross-embedded vectors produced by
+                         model_embeddings_cross.py for the given model tag.
+                         Mutually exclusive with use_combined.
+    """
+
+    # Determine input filename and output run_id qualifier
+    if cross_model_tag:
+        suffix = f"-cross_{cross_model_tag}"
+        vectors_input_filename = run_id + suffix + "-vectors_bio.tsv"
+        run_id = run_id + suffix
+    elif use_combined:
         vectors_input_filename = run_id + "-combined-vectors_bio.tsv"
-        # Update run_id to include combined qualifier for output files
         run_id = run_id + "-combined"
     else:
         vectors_input_filename = run_id + "-vectors_bio.tsv"
-    
+
     vectors_path = os.path.join(vector_out_folder_path, vectors_input_filename)
-    
+
     # Check if the input file exists
     if not os.path.exists(vectors_path):
-        if use_combined:
-            raise FileNotFoundError(f"Combined vectors file not found: {vectors_path}. Please run model_combine_datasets.py first.")
+        if cross_model_tag:
+            raise FileNotFoundError(
+                f"Cross-embedded vectors file not found: {vectors_path}. "
+                f"Please run model_embeddings_cross.py first."
+            )
+        elif use_combined:
+            raise FileNotFoundError(
+                f"Combined vectors file not found: {vectors_path}. "
+                f"Please run model_combine_datasets.py first."
+            )
         else:
             raise FileNotFoundError(f"Vectors file not found: {vectors_path}")
-    
+
     logging.info(f"Loading vectors from: {vectors_path}")
     vectors = np.loadtxt(vectors_path, delimiter='\t', dtype=np.float32)
     logging.info(f"Loaded vectors with shape: {vectors.shape}")
@@ -201,12 +220,25 @@ if __name__=="__main__":
                         help='MR partition rule')
     parser.add_argument('experiment_file',
                     help='Experiment .json file with reduction parameters')
-    parser.add_argument('--control', 
+    parser.add_argument('--control',
                         action='store_true',
                         help='Use combined dataset (original + control) for dimensionality reduction')
-    
+    parser.add_argument('--cross',
+                        metavar='MODEL_TAG',
+                        default=None,
+                        help=(
+                            'Use cross-embedded vectors produced by model_embeddings_cross.py. '
+                            'Provide the compact model tag used during embedding '
+                            '(e.g. "bsc"). The script will look for '
+                            '<run_id>-cross_<MODEL_TAG>-vectors_bio.tsv and tag all '
+                            'output files with the same suffix.'
+                        ))
+
     # Parse arguments
     args = parser.parse_args()
+
+    if args.control and args.cross:
+        parser.error("--control and --cross are mutually exclusive.")
 
     # input parameters
     input_data_root_path = config["INPUT_DATA_ROOT_PATH"]
@@ -229,11 +261,17 @@ if __name__=="__main__":
     #with tags(reduction_parameters["reduction_method"]):
         # Create experiment subfolder name based on JSON filename
         experiment_folder_name = reduction_parameters_file_name[:reduction_parameters_file_name.rindex('.')]
-        
-        # Add combined suffix to folder name if using control flag
-        if args.control:
+
+        # Tag folder name to match the vector variant being reduced
+        if args.cross:
+            experiment_folder_name += "-cross"
+        elif args.control:
             experiment_folder_name += "-combined"
-        
+
         experiments_out_folder_path = os.path.join(experiments_in_folder_path, experiment_folder_name)
         reduction_parameters["experiment_out_path"] = experiments_out_folder_path
-        reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters, args.control)
+        reduce_embedding_dimensions(
+            vector_out_folder_path, run_id, reduction_parameters,
+            use_combined=args.control,
+            cross_model_tag=args.cross,
+        )

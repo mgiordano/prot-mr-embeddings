@@ -107,6 +107,11 @@ def load_data(vec_path, meta_path):
     mdf = pd.read_csv(meta_path, sep="\t", encoding="utf-8", keep_default_na=False)
     mdf = mdf.reset_index().rename(columns={"index": "sequence_index"})
     merged = pd.merge(vdf, mdf, on="sequence_index", how="inner")
+    # Cast known categorical columns that pandas may parse as numeric
+    # (e.g. cath_class=1 → int64, cath_architecture=1.1 → float64)
+    for c in CATH_HIERARCHY:
+        if c in merged.columns and merged[c].dtype != object:
+            merged[c] = merged[c].astype(str)
     # Convert string cols to category dtype → 5-10× memory reduction, faster groupby
     for c in merged.select_dtypes(include="object").columns:
         merged[c] = merged[c].fillna("N/A").astype("category")
@@ -122,6 +127,13 @@ def detect_columns(df):
             n = df[c].nunique()
             cols.append(c)
             card[c] = n
+        elif pd.api.types.is_numeric_dtype(df[c]):
+            # Include low-cardinality numeric cols (they are likely categorical)
+            n = df[c].nunique()
+            if n <= CARD_THRESHOLD:
+                df[c] = df[c].astype(str).astype("category")
+                cols.append(c)
+                card[c] = n
     return cols, card
 
 
