@@ -1,4 +1,5 @@
 import numpy as np
+import pandas as pd
 from dotenv import dotenv_values
 import os
 import sys
@@ -145,7 +146,8 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"
 
 #@flow(name="Reduce embedding dimensions", log_prints=True)
 def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parameters,
-                                use_combined=False, cross_model_tag=None):
+                                use_combined=False, cross_model_tag=None,
+                                filter_col=None):
     """Reduce the dimensionality of the embedding vectors using t-SNE+PCA or UMAP.
 
     Args:
@@ -153,18 +155,27 @@ def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parame
         cross_model_tag: When set, load the cross-embedded vectors produced by
                          model_embeddings_cross.py for the given model tag.
                          Mutually exclusive with use_combined.
+        filter_col:      Optional (column_name, value) tuple.  When provided,
+                         rows whose *column_name* equals *value* in the
+                         corresponding metadata file are **dropped** before
+                         computing the dimensionality reduction.  Filtered
+                         metadata and vectors are saved alongside the
+                         originals.
     """
 
     # Determine input filename and output run_id qualifier
     if cross_model_tag:
         suffix = f"-cross_{cross_model_tag}"
         vectors_input_filename = run_id + suffix + "-vectors_bio.tsv"
+        metadata_input_filename = run_id + suffix + "-metadata.tsv"
         run_id = run_id + suffix
     elif use_combined:
         vectors_input_filename = run_id + "-combined-vectors_bio.tsv"
+        metadata_input_filename = run_id + "-combined-metadata.tsv"
         run_id = run_id + "-combined"
     else:
         vectors_input_filename = run_id + "-vectors_bio.tsv"
+        metadata_input_filename = run_id + "-metadata.tsv"
 
     vectors_path = os.path.join(vector_out_folder_path, vectors_input_filename)
 
@@ -186,6 +197,57 @@ def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parame
     logging.info(f"Loading vectors from: {vectors_path}")
     vectors = np.loadtxt(vectors_path, delimiter='\t', dtype=np.float32)
     logging.info(f"Loaded vectors with shape: {vectors.shape}")
+
+    # ── Optional metadata-based filtering ──────────────────────────────
+    if filter_col is not None:
+        col_name, col_value = filter_col
+        metadata_path = os.path.join(vector_out_folder_path, metadata_input_filename)
+        if not os.path.exists(metadata_path):
+            raise FileNotFoundError(
+                f"Metadata file required for --filter-col not found: {metadata_path}"
+            )
+
+        metadata_df = pd.read_csv(metadata_path, sep='\t')
+        if col_name not in metadata_df.columns:
+            raise ValueError(
+                f"Column '{col_name}' not found in metadata. "
+                f"Available columns: {list(metadata_df.columns)}"
+            )
+
+        if len(metadata_df) != vectors.shape[0]:
+            raise ValueError(
+                f"Metadata rows ({len(metadata_df)}) and vector rows "
+                f"({vectors.shape[0]}) mismatch."
+            )
+
+        # Build mask: keep rows that do NOT match the column value
+        keep_mask = metadata_df[col_name].astype(str) != str(col_value)
+        n_dropped = int((~keep_mask).sum())
+        logging.info(
+            f"filter-col: dropping {n_dropped} / {len(metadata_df)} rows "
+            f"where '{col_name}' == '{col_value}'"
+        )
+
+        # Filter vectors and metadata
+        vectors = vectors[keep_mask.values]
+        metadata_df = metadata_df[keep_mask].reset_index(drop=True)
+        logging.info(f"Vectors after filtering: {vectors.shape}")
+
+        # Persist filtered artefacts so downstream tools can use them
+        filtered_vectors_path = os.path.join(
+            vector_out_folder_path, run_id + "-filtered-vectors_bio.tsv"
+        )
+        np.savetxt(filtered_vectors_path, vectors, delimiter='\t', fmt='%.20f')
+        logging.info(f"Saved filtered vectors to: {filtered_vectors_path}")
+
+        filtered_metadata_path = os.path.join(
+            vector_out_folder_path, run_id + "-filtered-metadata.tsv"
+        )
+        metadata_df.to_csv(filtered_metadata_path, sep='\t', index=False)
+        logging.info(f"Saved filtered metadata to: {filtered_metadata_path}")
+
+        # Tag the run_id so output files don't overwrite unfiltered results
+        run_id = run_id + "-filtered"
 
     if reduction_parameters["reduction_method"] == "tsne":
         # Get TSNE implementation from experiment parameters, default to sklearn
@@ -233,6 +295,15 @@ if __name__=="__main__":
                             '<run_id>-cross_<MODEL_TAG>-vectors_bio.tsv and tag all '
                             'output files with the same suffix.'
                         ))
+    parser.add_argument('--filter-col',
+                        nargs=2,
+                        metavar=('COLUMN', 'VALUE'),
+                        default=None,
+                        help=(
+                            'Drop vectors whose metadata COLUMN equals VALUE '
+                            'before computing dimensionality reduction.  '
+                            'Example: --filter-col partition_type mr'
+                        ))
 
     # Parse arguments
     args = parser.parse_args()
@@ -267,11 +338,18 @@ if __name__=="__main__":
             experiment_folder_name += "-cross"
         elif args.control:
             experiment_folder_name += "-combined"
+        if args.filter_col:
+            experiment_folder_name += "-filtered"
 
         experiments_out_folder_path = os.path.join(experiments_in_folder_path, experiment_folder_name)
         reduction_parameters["experiment_out_path"] = experiments_out_folder_path
+
+        # Build filter_col tuple if flag was provided
+        filter_col = tuple(args.filter_col) if args.filter_col else None
+
         reduce_embedding_dimensions(
             vector_out_folder_path, run_id, reduction_parameters,
             use_combined=args.control,
             cross_model_tag=args.cross,
+            filter_col=filter_col,
         )
