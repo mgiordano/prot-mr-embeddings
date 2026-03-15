@@ -111,10 +111,14 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"
     utils.save_vectors_to_tsv(pca_baseline_vectors, run_id, "-vectors_pca-"+str(pca_n_components), experiment_out_path)
     
     # Apply PCA to do a more efficient and first dimensionality reduction
-    pca_n_components = tsne_parameters["pca_n_components"]
-    pca_parameters = {"n_components" : pca_n_components}
-    pca_reduced_vectors = compute_pca(vectors, pca_parameters)
-    utils.save_vectors_to_tsv(pca_reduced_vectors, run_id, "-vectors_pca-"+str(pca_n_components), experiment_out_path)
+    if "pca_n_components" in tsne_parameters and tsne_parameters["pca_n_components"] is not None:
+        pca_n_components = tsne_parameters["pca_n_components"]
+        pca_parameters = {"n_components" : pca_n_components}
+        pca_reduced_vectors = compute_pca(vectors, pca_parameters)
+        utils.save_vectors_to_tsv(pca_reduced_vectors, run_id, "-vectors_pca-"+str(pca_n_components), experiment_out_path)
+    else:
+        logging.info("pca_n_components not present, skipping PCA pre-reduction and using original vectors for t-SNE")
+        pca_reduced_vectors = vectors
 
     # Apply TSNE to do final dimensionality reduction to 2D
     max_iterations = max(len(tsne_parameters[key]) if isinstance(tsne_parameters[key], list) else 0 for key in tsne_parameters.keys())
@@ -142,6 +146,120 @@ def reduce_with_tsne(vectors, run_id, tsne_parameters, implementation="openTSNE"
         logging.info("END TASK - TSNE iteration")
     
     logging.info(f"END TASK - reduce_with_tsne using {implementation}")
+    return reduced_vectors
+
+def map_umap_parameters(umap_parameters, iteration_index):
+    """Extract UMAP parameters for a given iteration index."""
+    params = {
+        "n_neighbors":  get_param_value(umap_parameters["n_neighbors"], iteration_index),
+        "min_dist":     get_param_value(umap_parameters["min_dist"], iteration_index),
+        "n_components":  get_param_value(umap_parameters["n_components"], iteration_index),
+        "random_state":  get_param_value(umap_parameters["random_state"], iteration_index),
+    }
+
+    # Optional keys with sensible defaults
+    if "init" in umap_parameters:
+        params["init"] = get_param_value(umap_parameters["init"], iteration_index)
+    else:
+        params["init"] = "spectral"
+
+    if "metric" in umap_parameters:
+        params["metric"] = get_param_value(umap_parameters["metric"], iteration_index)
+    else:
+        params["metric"] = "euclidean"
+
+    # n_jobs
+    if "n_jobs" in umap_parameters and umap_parameters["n_jobs"] is not None:
+        params["n_jobs"] = get_param_value(umap_parameters["n_jobs"], iteration_index)
+    else:
+        params["n_jobs"] = os.cpu_count()
+        logging.info(f"n_jobs not specified, defaulting to {params['n_jobs']}")
+
+    # densMAP options
+    densmap = False
+    dens_lambda = None
+    if "densmap" in umap_parameters:
+        densmap = get_param_value(umap_parameters["densmap"], iteration_index)
+    if densmap and "dens_lambda" in umap_parameters:
+        dens_lambda = get_param_value(umap_parameters["dens_lambda"], iteration_index)
+
+    if densmap:
+        params["densmap"] = True
+        if dens_lambda is not None:
+            params["dens_lambda"] = dens_lambda
+
+    return params, densmap
+
+def create_umap_filename_suffix(params, is_densmap):
+    """Create standardized filename suffix for UMAP outputs."""
+    tag = "densmap" if is_densmap else "umap"
+    suffix = (f"-vectors_{tag}"
+              f"-{params['n_neighbors']}"
+              f"-{params['min_dist']}"
+              f"-{params['init']}"
+              f"-{params['metric']}"
+              f"-{params['random_state']}")
+    if is_densmap and "dens_lambda" in params:
+        suffix += f"-dl{params['dens_lambda']}"
+    return suffix
+
+def log_umap_iteration_start(params, is_densmap):
+    """Standardized logging for UMAP iteration start."""
+    tag = "densMAP" if is_densmap else "UMAP"
+    msg = (f"START TASK - {tag} iteration - "
+           f"n_neighbors: {params['n_neighbors']} - "
+           f"min_dist: {params['min_dist']} - "
+           f"init: {params['init']} - "
+           f"metric: {params['metric']} - "
+           f"random_state: {params['random_state']} - "
+           f"n_jobs: {params['n_jobs']}")
+    if is_densmap and "dens_lambda" in params:
+        msg += f" - dens_lambda: {params['dens_lambda']}"
+    logging.info(msg)
+
+def reduce_with_umap(vectors, run_id, umap_parameters):
+    """Reduce dimensionality using UMAP (or densMAP)."""
+    import umap as umap_lib
+
+    logging.info("START TASK - reduce_with_umap")
+
+    experiment_out_path = umap_parameters["experiment_out_path"]
+    os.makedirs(experiment_out_path, exist_ok=True)
+
+    # PCA baseline for comparison (same n_components as final UMAP output)
+    pca_baseline_n = umap_parameters["n_components"][0]
+    pca_baseline_vectors = compute_pca(vectors, {"n_components": pca_baseline_n})
+    utils.save_vectors_to_tsv(pca_baseline_vectors, run_id,
+                              f"-vectors_pca-{pca_baseline_n}", experiment_out_path)
+
+    # PCA pre-reduction
+    if "pca_n_components" in umap_parameters and umap_parameters["pca_n_components"] is not None:
+        pca_n = umap_parameters["pca_n_components"]
+        pca_reduced = compute_pca(vectors, {"n_components": pca_n})
+        utils.save_vectors_to_tsv(pca_reduced, run_id,
+                                  f"-vectors_pca-{pca_n}", experiment_out_path)
+    else:
+        logging.info("pca_n_components not present, skipping PCA pre-reduction and using original vectors for UMAP")
+        pca_reduced = vectors
+
+    # Iterate over UMAP parameter sweep
+    array_keys = [k for k, v in umap_parameters.items() if isinstance(v, list)]
+    max_iterations = max(len(umap_parameters[k]) for k in array_keys) if array_keys else 1
+
+    for i in range(max_iterations):
+        params, is_densmap = map_umap_parameters(umap_parameters, i)
+        log_umap_iteration_start(params, is_densmap)
+
+        reducer = umap_lib.UMAP(**params)
+        reduced_vectors = reducer.fit_transform(pca_reduced)
+
+        out_file_suffix = create_umap_filename_suffix(params, is_densmap)
+        logging.info(f"START TASK - save {out_file_suffix}.tsv")
+        utils.save_vectors_to_tsv(reduced_vectors, run_id, out_file_suffix, experiment_out_path)
+        logging.info(f"END TASK - save {out_file_suffix}.tsv")
+        logging.info("END TASK - UMAP iteration")
+
+    logging.info("END TASK - reduce_with_umap")
     return reduced_vectors
 
 #@flow(name="Reduce embedding dimensions", log_prints=True)
@@ -249,11 +367,17 @@ def reduce_embedding_dimensions(vector_out_folder_path, run_id, reduction_parame
         # Tag the run_id so output files don't overwrite unfiltered results
         run_id = run_id + "-filtered"
 
-    if reduction_parameters["reduction_method"] == "tsne":
+    reduction_method = reduction_parameters["reduction_method"]
+    if reduction_method == "tsne":
         # Get TSNE implementation from experiment parameters, default to sklearn
         tsne_implementation = reduction_parameters.get("tsne_implementation", "sklearn")
         logging.info(f"Using TSNE implementation from experiment config: {tsne_implementation}")
         reduce_with_tsne(vectors, run_id, reduction_parameters, tsne_implementation)
+    elif reduction_method == "umap":
+        logging.info("Using UMAP reduction method")
+        reduce_with_umap(vectors, run_id, reduction_parameters)
+    else:
+        raise ValueError(f"Unsupported reduction_method: {reduction_method}")
 
 # run the flow!
 if __name__=="__main__":
