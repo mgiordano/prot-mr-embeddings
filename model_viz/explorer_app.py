@@ -83,6 +83,24 @@ def construct_paths(ts, ds_key, filt_key, part_key, exp, combined):
     rid = f"{ts}-{fds}-{fn}-{pn}"
     mf = f"{rid}-combined-metadata.tsv" if combined else f"{rid}-metadata.tsv"
     ef = f"{exp}-combined" if combined else exp
+
+    # When model_dim_reduction was run with --filter-col the experiment folder
+    # gets a "-filtered" suffix and a dedicated metadata file is saved next to
+    # the original.  Detect this and swap to the filtered metadata so that row
+    # indices stay aligned with the filtered vectors.
+    if ef.endswith("-filtered"):
+        if "-cross-filtered" in ef:
+            # Cross-model filtered: metadata is <rid>-cross_<tag>-filtered-metadata.tsv.
+            # Tag is unknown here, so use a glob to find the file.
+            pattern = os.path.join(vof, f"{rid}-cross_*-filtered-metadata.tsv")
+            matches = glob.glob(pattern)
+            if matches:
+                mf = os.path.basename(matches[0])
+        elif combined:
+            mf = f"{rid}-combined-filtered-metadata.tsv"
+        else:
+            mf = f"{rid}-filtered-metadata.tsv"
+
     return dict(
         metadata=os.path.join(vof, mf),
         exp_folder=os.path.join(vof, "experiments", ef),
