@@ -163,12 +163,7 @@ def _build_spatial_index(df):
 
 
 def _decimate(df, max_pts, x_range=None, y_range=None):
-    """Return a decimated subset of *df* for the current view.
-
-    - If *x_range*/*y_range* are given, filter to visible points first.
-    - If the visible set exceeds *max_pts*, subsample evenly across spatial
-      grid bins so the visual distribution stays representative.
-    """
+    """Return a uniform random decimated subset of *df* for the current view."""
     if x_range is not None and y_range is not None:
         mask = (
             (df["reduced_vector_d1"] >= x_range[0]) &
@@ -183,19 +178,10 @@ def _decimate(df, max_pts, x_range=None, y_range=None):
     if len(visible) <= max_pts:
         return visible
 
-    # Grid-stratified subsample: pick up to k points per bin
-    bin_x = _S["grid_bin_x"]
-    bin_y = _S["grid_bin_y"]
-    if x_range is not None and y_range is not None:
-        bin_x = bin_x[mask.values] if hasattr(mask, 'values') else bin_x[mask]
-        bin_y = bin_y[mask.values] if hasattr(mask, 'values') else bin_y[mask]
-    # Composite bin id
-    cell = bin_x.astype(np.int32) * _GRID_BINS + bin_y.astype(np.int32)
-    # Shuffle and take first max_pts with even bin coverage
+    # Uniform random subsample
     rng = np.random.RandomState(42)
     idx = np.arange(len(visible))
     rng.shuffle(idx)
-    # Assign shuffled order, then take first max_pts
     if len(idx) > max_pts:
         idx = idx[:max_pts]
     return visible.iloc[idx]
@@ -237,21 +223,33 @@ def _colors_for(labels):
 
 def build_distinct(df, col, selected, pt, alpha, bg):
     """Scatter with distinct color per category (low cardinality)."""
-    all_cats = sorted(df[col].unique())
+    if df[col].dtype.name == 'category':
+        all_cats = sorted([c for c in df[col].cat.categories if c in df[col].unique()])
+    else:
+        all_cats = sorted(df[col].unique())
     sel = set(selected) if selected else set(all_cats)
     colors = _S["color_map"]  # precomputed stable color map
     fig = go.Figure()
     trace_index_map = []
-    for cat, group in df.groupby(col, observed=True, sort=True):
-        if cat not in sel:
+
+    # Filter to visible categories and compute true counts
+    vis_df = df[df[col].isin(sel)]
+    true_counts = vis_df[col].value_counts()
+    
+    # Decimate visible points for rendering performance
+    plot_df = _decimate(vis_df, _MAX_POINTS_ZOOMED_OUT)
+
+    for cat, group in plot_df.groupby(col, observed=True, sort=True):
+        if cat not in sel or group.empty:
             continue
         c = colors.get(cat, "#888888")
+        count_str = f"{true_counts[cat]:,}"
         fig.add_trace(go.Scattergl(
             x=group["reduced_vector_d1"].values,
             y=group["reduced_vector_d2"].values,
             mode="markers",
             marker=dict(size=pt, color=c, opacity=alpha, line_width=0),
-            name=f"{cat} ({len(group):,})",
+            name=f"{cat} ({count_str})",
             hoverinfo="none",
         ))
         # Map (traceIndex, pointIndex) → original df row index
@@ -286,16 +284,24 @@ def build_highlight(df, col, highlighted, pt, alpha, bg):
         colors = _S["color_map"]  # precomputed stable color map
         hl_set = set(highlighted)
         hl_mask = df[col].isin(hl_set)
-        hl_df = df[hl_mask]
+        hl_df_full = df[hl_mask]
+        true_counts = hl_df_full[col].value_counts()
+        
+        # Cap highlighted points if they are anomalously huge, to avoid freezing
+        hl_df = _decimate(hl_df_full, _MAX_POINTS_ZOOMED_OUT)
+        
         for cat, group in hl_df.groupby(col, observed=True, sort=True):
+            if group.empty:
+                continue
             c = colors.get(cat, "#888888")
+            count_str = f"{true_counts[cat]:,}"
             fig.add_trace(go.Scattergl(
                 x=group["reduced_vector_d1"].values,
                 y=group["reduced_vector_d2"].values,
                 mode="markers",
                 marker=dict(size=pt, color=c, opacity=alpha,
                             line_width=0),
-                name=f"{cat} ({len(group):,})",
+                name=f"{cat} ({count_str})",
                 hoverinfo="none",
             ))
             trace_index_map.append(group.index.values)
@@ -364,14 +370,11 @@ def build_hierarchy(df, path_json, pt, alpha, bg):
     all_hier_cats = sorted(df[col].unique())
     _S["color_map"] = _colors_for(all_hier_cats)
 
-    # Apply same decimation as scatter tab to keep the browser responsive
-    filt_dec = _decimate(filt, _MAX_POINTS_ZOOMED_OUT)
-
     if card <= CARD_THRESHOLD:
-        fig = build_distinct(filt_dec, col, None, pt, alpha, bg)
+        fig = build_distinct(filt, col, None, pt, alpha, bg)
     else:
         top = filt[col].value_counts().head(10).index.tolist()
-        fig = build_highlight(filt_dec, col, top, pt, alpha, bg)
+        fig = build_highlight(filt, col, top, pt, alpha, bg)
 
     _S["color_map"] = prev_cmap  # restore scatter tab color map
 
@@ -733,9 +736,6 @@ def load_file(n, fpath, sample_pct):
             _S["df"] = full_df
         del full_df  # free memory
         _S["meta_cols"], _S["card"] = detect_columns(_S["df"])
-        # Precompute spatial grid index for zoom-level decimation
-        _S["grid_x_edges"], _S["grid_y_edges"], _S["grid_bin_x"], _S["grid_bin_y"] = \
-            _build_spatial_index(_S["df"])
         _S["trace_index_map"] = None
         _S["last_fig"] = None
         _S["last_fig_args"] = None
@@ -837,15 +837,12 @@ def topn_fill(n, col, mode):
 def update_main_plot(_n, mode, cats, highlighted, density_cat, pt, alpha, bg, col, loaded, relayout):
     if not loaded or _S["df"] is None or not col:
         return go.Figure()
-    # Apply decimation to cap point count for the initial render.
-    # Zoom/pan is handled client-side by WebGL — no server round-trip needed.
-    df_dec = _decimate(_S["df"], _MAX_POINTS_ZOOMED_OUT)
     if mode == "distinct":
-        fig = build_distinct(df_dec, col, cats or None, pt, alpha, bg)
+        fig = build_distinct(_S["df"], col, cats or None, pt, alpha, bg)
     elif mode == "highlight":
-        fig = build_highlight(df_dec, col, highlighted or [], pt, alpha, bg)
+        fig = build_highlight(_S["df"], col, highlighted or [], pt, alpha, bg)
     else:
-        fig = build_density(df_dec, col, density_cat, bg)
+        fig = build_density(_S["df"], col, density_cat, bg)
 
     # Preserve previous zoom/pan so re-rendering with a new category keeps
     # the same view region (useful for comparing regions across labels).
