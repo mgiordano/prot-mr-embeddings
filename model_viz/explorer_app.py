@@ -71,7 +71,7 @@ _PAL30 = [
 _S = dict(df=None, meta_cols=[], card={}, paths=None,
           grid_x_edges=None, grid_y_edges=None, grid_bin_x=None, grid_bin_y=None,
           trace_index_map=None, last_fig=None, last_fig_args=None,
-          color_map={})
+          color_map={}, hier_filt_df=None)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -129,12 +129,15 @@ def find_vector_files(folder):
         return []
     return sorted(
         f for f in glob.glob(os.path.join(folder, "*.tsv"))
-        if any(t in os.path.basename(f) for t in ("vectors_tsne", "vectors_umap", "vectors_densmap"))
+        if any(t in os.path.basename(f) for t in ("vectors_tsne", "vectors_umap", "vectors_densmap", "vectors_pca"))
     )
 
 
 def load_data(vec_path, meta_path):
     vdf = pd.read_csv(vec_path, sep="\t", dtype=np.float32)
+    # If more than 2 columns, take only the first two (for 2D visualization)
+    if vdf.shape[1] > 2:
+        vdf = vdf.iloc[:, :2]
     vdf.columns = ["reduced_vector_d1", "reduced_vector_d2"]
     vdf = vdf.reset_index().rename(columns={"index": "sequence_index"})
     mdf = pd.read_csv(meta_path, sep="\t", encoding="utf-8", keep_default_na=False)
@@ -215,6 +218,16 @@ def _colors_for(labels):
     gb = cc.glasbey_light
     return {lab: (_PAL30[i] if i < len(_PAL30) else gb[i % len(gb)])
             for i, lab in enumerate(sorted(labels))}
+
+def _global_colors_for_col(df, col):
+    """Returns a deterministic colour map for all active values of a column in the global dataset."""
+    if col not in df.columns:
+        return {}
+    if df[col].dtype.name == "category":
+        cats = sorted([c for c in df[col].cat.categories if c in df[col].unique()])
+    else:
+        cats = sorted(df[col].unique())
+    return _colors_for(cats)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -342,8 +355,14 @@ def build_density(df, col, cat_filter, bg):
     return fig
 
 
-def build_hierarchy(df, path_json, pt, alpha, bg):
-    """CATH hierarchy drill-down. path_json = [[col, val], ...]"""
+def build_hierarchy(df, path_json, pt, alpha, bg,
+                    viz_col=None, viz_mode=None, viz_cats=None, viz_highlighted=None):
+    """CATH hierarchy drill-down with sidebar-controlled visualization.
+
+    When *viz_col* is provided the filtered subset is rendered using the
+    sidebar's colour-by column, mode, and category selections instead of
+    the default CATH-level column.
+    """
     available = [c for c in CATH_HIERARCHY if c in df.columns]
     if not available:
         fig = go.Figure()
@@ -359,31 +378,48 @@ def build_hierarchy(df, path_json, pt, alpha, bg):
         fig.add_annotation(text="No data at this level", showarrow=False, font_size=16)
         return fig, [], available, len(path_list)
 
+    # Store filtered subset for sidebar callbacks
+    _S["hier_filt_df"] = filt
+
     lvl = min(len(path_list), len(available) - 1)
-    col = available[lvl]
-    card = filt[col].nunique()
-    cats = sorted(filt[col].unique())
+    hier_col = available[lvl]
+    hier_cats = sorted(filt[hier_col].unique())
 
-    # Use stable color map for this hierarchy column (computed from ALL
-    # categories in the full df so drill-down colors stay consistent).
+    # Decide which column to colour by: sidebar choice or default CATH level
+    render_col = viz_col if (viz_col and viz_col in filt.columns) else hier_col
+    card = filt[render_col].nunique()
+
+    # Compute stable color map for the render column (using global dataset for consistency)
     prev_cmap = _S["color_map"]
-    all_hier_cats = sorted(df[col].unique())
-    _S["color_map"] = _colors_for(all_hier_cats)
+    _S["color_map"] = _global_colors_for_col(df, render_col)
 
-    if card <= CARD_THRESHOLD:
-        fig = build_distinct(filt, col, None, pt, alpha, bg)
-    else:
-        top = filt[col].value_counts().head(10).index.tolist()
-        fig = build_highlight(filt, col, top, pt, alpha, bg)
+    # Choose rendering mode
+    mode = viz_mode or ("distinct" if card <= CARD_THRESHOLD else "highlight")
+
+    if mode == "density":
+        # For density we pass the first highlighted cat as filter, or None
+        density_cat = viz_cats if isinstance(viz_cats, str) else None
+        fig = build_density(filt, render_col, density_cat, bg)
+    elif mode == "distinct":
+        fig = build_distinct(filt, render_col, viz_cats or None, pt, alpha, bg)
+    else:  # highlight
+        if viz_highlighted:
+            hl = viz_highlighted
+        else:
+            hl = filt[render_col].value_counts().head(10).index.tolist()
+        fig = build_highlight(filt, render_col, hl, pt, alpha, bg)
 
     _S["color_map"] = prev_cmap  # restore scatter tab color map
 
+    # Build breadcrumb title
     bc = "All"
     for c, v in path_list:
         bc += f" → {c}: {v}"
-    bc += f" → [{col} ({card:,})]"
+    bc += f" → [{hier_col} ({filt[hier_col].nunique():,})]"
+    if render_col != hier_col:
+        bc += f"  ·  color: {render_col} ({card:,})"
     fig.update_layout(title=bc)
-    return fig, cats, available, lvl
+    return fig, hier_cats, available, lvl
 
 
 # ── Styling helpers ───────────────────────────────────────────────────────────
@@ -593,6 +629,7 @@ main_area = html.Div(style=S_MAIN, children=[
     # hidden stores
     dcc.Store(id="store-hier-path", data=[]),
     dcc.Store(id="store-data-loaded", data=False),
+    dcc.Store(id="store-hier-render-tick", data=0),  # bumped by Render Plot btn
 ])
 
 app.layout = html.Div(style={"display": "flex", "height": "100vh", "overflow": "hidden"},
@@ -784,21 +821,27 @@ def load_file(n, fpath, sample_pct):
     Output("sld-topn", "max"),
     Input("sel-col", "value"),
     State("store-data-loaded", "data"),
+    State("tabs", "value"),
     prevent_initial_call=True,
 )
-def on_col_change(col, loaded):
+def on_col_change(col, loaded, active_tab):
     if not loaded or not col or _S["df"] is None:
         raise PreventUpdate
-    card = _S["card"].get(col, 0)
-    mode = "distinct" if card <= CARD_THRESHOLD else "highlight"
+    # Use the filtered subset when on the hierarchy tab
+    source_df = (_S["hier_filt_df"]
+                 if active_tab == "hierarchy" and _S.get("hier_filt_df") is not None
+                 else _S["df"])
+    if col not in source_df.columns:
+        raise PreventUpdate
     # Single value_counts() call — O(n) instead of O(n*k)
-    vc = _S["df"][col].value_counts()
+    vc = source_df[col].value_counts()
+    vc = vc[vc > 0]  # drop 0-count categories
+    card = len(vc)
     cats = sorted(vc.index)
-    # Precompute stable color map for ALL categories in this column.
-    # This ensures the same label always gets the same color regardless
-    # of which subset is selected/rendered.
-    _S["color_map"] = _colors_for(cats)
+    # Precompute stable color map using global df so colors are consistent across filters
+    _S["color_map"] = _global_colors_for_col(_S["df"], col)
     cat_opts = [{"label": f"{c}  ({vc[c]:,})", "value": c} for c in cats]
+    mode = "distinct" if card <= CARD_THRESHOLD else "highlight"
     # For distinct: pre-select all; for highlight: pre-select top 10
     if mode == "distinct":
         return (mode, cat_opts, cats, cat_opts, [], cat_opts, None, min(card, 50))
@@ -830,19 +873,26 @@ def toggle_mode_controls(mode):
     Input("sld-topn", "value"),
     State("sel-col", "value"),
     State("sel-mode", "value"),
+    State("tabs", "value"),
     prevent_initial_call=True,
 )
-def topn_fill(n, col, mode):
+def topn_fill(n, col, mode, active_tab):
     if mode != "highlight" or not col or _S["df"] is None:
         raise PreventUpdate
     if n == 0:
         return []
-    return _S["df"][col].value_counts().head(n).index.tolist()
+    source_df = (_S["hier_filt_df"]
+                 if active_tab == "hierarchy" and _S.get("hier_filt_df") is not None
+                 else _S["df"])
+    if col not in source_df.columns:
+        raise PreventUpdate
+    return source_df[col].value_counts().head(n).index.tolist()
 
 
 # ── Main scatter plot (button-triggered) ─────────────────────────────────────
 @app.callback(
     Output("main-plot", "figure"),
+    Output("store-hier-render-tick", "data"),
     Input("btn-render", "n_clicks"),
     State("sel-mode", "value"),
     State("sel-cats", "value"),
@@ -854,11 +904,19 @@ def topn_fill(n, col, mode):
     State("sel-col", "value"),
     State("store-data-loaded", "data"),
     State("main-plot", "relayoutData"),
+    State("tabs", "value"),
+    State("store-hier-render-tick", "data"),
     prevent_initial_call=True,
 )
-def update_main_plot(_n, mode, cats, highlighted, density_cat, pt, alpha, bg, col, loaded, relayout):
+def update_main_plot(_n, mode, cats, highlighted, density_cat, pt, alpha, bg, col, loaded, relayout, active_tab, tick):
     if not loaded or _S["df"] is None or not col:
-        return go.Figure()
+        return go.Figure(), no_update
+
+    # When on hierarchy tab, bump the render tick to trigger hierarchy re-render
+    # instead of updating the scatter plot.
+    if active_tab == "hierarchy":
+        return no_update, (tick or 0) + 1
+
     if mode == "distinct":
         fig = build_distinct(_S["df"], col, cats or None, pt, alpha, bg)
     elif mode == "highlight":
@@ -872,7 +930,7 @@ def update_main_plot(_n, mode, cats, highlighted, density_cat, pt, alpha, bg, co
         fig.update_xaxes(range=[relayout["xaxis.range[0]"], relayout["xaxis.range[1]"]])
         fig.update_yaxes(range=[relayout["yaxis.range[0]"], relayout["yaxis.range[1]"]])
 
-    return fig
+    return fig, no_update
 
 
 # ── Click-to-inspect metadata ────────────────────────────────────────────────
@@ -918,8 +976,7 @@ def on_point_click(click_data, loaded):
         # Compute deterministic color for this column's value
         color = None
         if c not in _COLORBY_EXCLUDE and _S["df"][c].dtype.name == "category":
-            all_cats = sorted(_S["df"][c].cat.categories)
-            col_colors = _colors_for(all_cats)
+            col_colors = _global_colors_for_col(_S["df"], c)
             color = col_colors.get(val)
         if color:
             badge = html.Span(val, style={
@@ -991,8 +1048,7 @@ def on_hier_point_click(click_data, loaded, path_json):
         val = str(row[c])
         color = None
         if c not in _COLORBY_EXCLUDE and _S["df"][c].dtype.name == "category":
-            all_cats = sorted(_S["df"][c].cat.categories)
-            col_colors = _colors_for(all_cats)
+            col_colors = _global_colors_for_col(_S["df"], c)
             color = col_colors.get(val)
         if color:
             badge = html.Span(val, style={
@@ -1049,19 +1105,117 @@ def hier_navigate(drill_n, back_n, reset_n, cat, path, loaded):
     Output("hier-plot", "figure"),
     Output("sel-hier-cat", "options"),
     Output("sel-hier-cat", "value"),
+    Output("sel-col", "options", allow_duplicate=True),
+    Output("sel-col", "value", allow_duplicate=True),
+    Output("sel-mode", "value", allow_duplicate=True),
+    Output("sel-cats", "options", allow_duplicate=True),
+    Output("sel-cats", "value", allow_duplicate=True),
+    Output("sel-highlight", "options", allow_duplicate=True),
+    Output("sel-highlight", "value", allow_duplicate=True),
+    Output("sel-density-cat", "options", allow_duplicate=True),
+    Output("sel-density-cat", "value", allow_duplicate=True),
+    Output("sld-topn", "max", allow_duplicate=True),
     Input("store-hier-path", "data"),
     Input("tabs", "value"),
+    Input("store-hier-render-tick", "data"),
     State("sld-pt", "value"),
     State("sld-alpha", "value"),
     State("sel-bg", "value"),
+    State("sel-col", "value"),
+    State("sel-mode", "value"),
+    State("sel-cats", "value"),
+    State("sel-highlight", "value"),
+    State("sel-density-cat", "value"),
     State("store-data-loaded", "data"),
+    prevent_initial_call=True,
 )
-def update_hierarchy(path, tab, pt, alpha, bg, loaded):
+def update_hierarchy(path, tab, render_tick, pt, alpha, bg,
+                     viz_col, viz_mode, viz_cats, viz_highlighted, viz_density_cat,
+                     loaded):
     if tab != "hierarchy" or not loaded or _S["df"] is None:
         raise PreventUpdate
-    fig, cats, avail, _lvl = build_hierarchy(_S["df"], path, pt, alpha, bg)
-    cat_opts = [{"label": c, "value": c} for c in cats]
-    return fig, cat_opts, None
+
+    trigger = ctx.triggered_id
+    is_render = (trigger == "store-hier-render-tick")
+
+    if is_render:
+        # Render-button click: use the sidebar's current settings
+        fig, hier_cats, avail, _lvl = build_hierarchy(
+            _S["df"], path, pt, alpha, bg,
+            viz_col=viz_col, viz_mode=viz_mode,
+            viz_cats=viz_cats if viz_mode == "distinct" else viz_density_cat,
+            viz_highlighted=viz_highlighted if viz_mode == "highlight" else None,
+        )
+        hier_cat_opts = [{"label": c, "value": c} for c in hier_cats]
+        return (fig, hier_cat_opts, no_update,
+                no_update, no_update, no_update,
+                no_update, no_update, no_update, no_update,
+                no_update, no_update, no_update)
+
+    # Path change or tab switch: render with CATH-level defaults
+    # (don't pass stale sidebar state — let build_hierarchy pick the
+    #  new CATH level column automatically)
+    fig, hier_cats, avail, _lvl = build_hierarchy(
+        _S["df"], path, pt, alpha, bg,
+    )
+    hier_cat_opts = [{"label": c, "value": c} for c in hier_cats]
+
+    # Update sidebar to reflect filtered subset
+    filt = _S.get("hier_filt_df")
+    if filt is None or filt.empty:
+        return (fig, hier_cat_opts, None,
+                no_update, no_update, no_update,
+                no_update, no_update, no_update, no_update,
+                no_update, no_update, no_update)
+
+    # Compute available columns in filtered subset
+    filt_cols = []
+    filt_card = {}
+    for c in filt.columns:
+        if c in _COLORBY_EXCLUDE:
+            continue
+        if filt[c].dtype == object or filt[c].dtype.name == "category":
+            n = filt[c].nunique()
+            if n > 0:
+                filt_cols.append(c)
+                filt_card[c] = n
+        elif pd.api.types.is_numeric_dtype(filt[c]):
+            n = filt[c].nunique()
+            if 0 < n <= CARD_THRESHOLD:
+                filt_cols.append(c)
+                filt_card[c] = n
+
+    col_opts = [{"label": f"{c}  ({filt_card[c]:,})", "value": c} for c in filt_cols]
+
+    # Pick the current CATH level as default colour column
+    default_col = avail[_lvl] if _lvl < len(avail) else (filt_cols[0] if filt_cols else None)
+    if default_col not in filt_cols and filt_cols:
+        default_col = filt_cols[0]
+
+    # Compute category options for the chosen column
+    if default_col and default_col in filt.columns:
+        vc = filt[default_col].value_counts()
+        vc = vc[vc > 0]  # drop 0-count
+        cats_sorted = sorted(vc.index)
+        card = len(vc)
+        cat_opts = [{"label": f"{c}  ({vc[c]:,})", "value": c} for c in cats_sorted]
+        mode = "distinct" if card <= CARD_THRESHOLD else "highlight"
+        if mode == "distinct":
+            return (fig, hier_cat_opts, None,
+                    col_opts, default_col, mode,
+                    cat_opts, cats_sorted, cat_opts, [],
+                    cat_opts, None, min(card, 50))
+        else:
+            top10 = vc.head(10).index.tolist()
+            return (fig, hier_cat_opts, None,
+                    col_opts, default_col, mode,
+                    cat_opts, [], cat_opts, top10,
+                    cat_opts, None, min(card, 50))
+    else:
+        return (fig, hier_cat_opts, None,
+                col_opts, default_col, no_update,
+                [], [], [], [],
+                [], None, no_update)
 
 
 # ── Export ────────────────────────────────────────────────────────────────────
