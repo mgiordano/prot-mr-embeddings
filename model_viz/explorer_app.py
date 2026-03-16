@@ -54,8 +54,8 @@ _COLORBY_EXCLUDE = INTERNAL_COLS | {"sequence_name"}
 
 # Zoom-adaptive decimation settings
 _GRID_BINS = 500             # bins per axis for spatial indexing
-_MAX_POINTS_ZOOMED_OUT = 100_000   # cap when fully zoomed out
-_MAX_POINTS_PARTIAL    = 200_000   # cap when partially zoomed in
+_MAX_POINTS_ZOOMED_OUT = 300_000   # cap when fully zoomed out
+_MAX_POINTS_PARTIAL    = 500_000   # cap when partially zoomed in
 
 # 30 hand-picked distinct colours (low-cardinality palette)
 _PAL30 = [
@@ -221,13 +221,22 @@ def _colors_for(labels):
 
 def _global_colors_for_col(df, col):
     """Returns a deterministic colour map for all active values of a column in the global dataset."""
+    if _S.get("global_colors") is None:
+        _S["global_colors"] = {}
+        
+    if col in _S["global_colors"]:
+        return _S["global_colors"][col]
+
     if col not in df.columns:
         return {}
+    
     if df[col].dtype.name == "category":
-        cats = sorted([c for c in df[col].cat.categories if c in df[col].unique()])
+        cats = sorted(list(df[col].cat.categories))
     else:
-        cats = sorted(df[col].unique())
-    return _colors_for(cats)
+        cats = sorted(df[col].dropna().unique())
+        
+    _S["global_colors"][col] = _colors_for(cats)
+    return _S["global_colors"][col]
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -640,16 +649,39 @@ app.layout = html.Div(style={"display": "flex", "height": "100vh", "overflow": "
 #  CALLBACKS
 # ══════════════════════════════════════════════════════════════════════════════
 
-# ── Tab visibility ────────────────────────────────────────────────────────────
+# ── Tab visibility & state reset ─────────────────────────────────────────────
 @app.callback(
     Output("tab-scatter", "style"),
     Output("tab-hierarchy", "style"),
+    Output("sel-col", "value", allow_duplicate=True),
+    Output("main-plot", "figure", allow_duplicate=True),
+    Output("hier-plot", "figure", allow_duplicate=True),
     Input("tabs", "value"),
+    State("store-data-loaded", "data"),
+    prevent_initial_call=True,
 )
-def toggle_tabs(tab):
+def toggle_tabs(tab, loaded):
     show = {"display": "block"}
     hide = {"display": "none"}
-    return (show, hide) if tab == "scatter" else (hide, show)
+    
+    # When switching tabs, clear the colour column selector to force a re-calc 
+    # of the default column and options for the newly active tab's dataset subset.
+    # We also pass an empty figure to clear out any stale plot from the previous view.
+    empty_fig = go.Figure()
+    
+    # We only trigger this reset if data is actually loaded, otherwise it might 
+    # conflict during the initial layout render.
+    reset_col = None if loaded else no_update
+    fig_scatter = empty_fig if loaded and tab != "scatter" else no_update
+    fig_hier = empty_fig if loaded and tab != "hierarchy" else no_update
+
+    return (
+        show if tab == "scatter" else hide,
+        show if tab == "hierarchy" else hide,
+        reset_col,
+        fig_scatter,
+        fig_hier
+    )
 
 
 # ── Cascading UI Callbacks ────────────────────────────────────────────────────
@@ -798,6 +830,7 @@ def load_file(n, fpath, sample_pct):
         _S["trace_index_map"] = None
         _S["last_fig"] = None
         _S["last_fig_args"] = None
+        _S["global_colors"] = {}
     except Exception as e:
         return {"display": "none"}, [], None, False, f"❌ Load error: {e}"
 
@@ -820,11 +853,12 @@ def load_file(n, fpath, sample_pct):
     Output("sel-density-cat", "value"),
     Output("sld-topn", "max"),
     Input("sel-col", "value"),
+    State("sld-topn", "value"),
     State("store-data-loaded", "data"),
     State("tabs", "value"),
     prevent_initial_call=True,
 )
-def on_col_change(col, loaded, active_tab):
+def on_col_change(col, top_n_val, loaded, active_tab):
     if not loaded or not col or _S["df"] is None:
         raise PreventUpdate
     # Use the filtered subset when on the hierarchy tab
@@ -842,12 +876,13 @@ def on_col_change(col, loaded, active_tab):
     _S["color_map"] = _global_colors_for_col(_S["df"], col)
     cat_opts = [{"label": f"{c}  ({vc[c]:,})", "value": c} for c in cats]
     mode = "distinct" if card <= CARD_THRESHOLD else "highlight"
-    # For distinct: pre-select all; for highlight: pre-select top 10
+    top_n = top_n_val if top_n_val is not None else 10
+    # For distinct: pre-select all; for highlight: pre-select top N
     if mode == "distinct":
         return (mode, cat_opts, cats, cat_opts, [], cat_opts, None, min(card, 50))
     else:
-        top10 = vc.head(10).index.tolist()
-        return (mode, cat_opts, [], cat_opts, top10, cat_opts, None, min(card, 50))
+        top_n_list = vc.head(top_n).index.tolist()
+        return (mode, cat_opts, [], cat_opts, top_n_list, cat_opts, None, min(card, 50))
 
 
 # ── Show/hide mode-specific controls ─────────────────────────────────────────
@@ -867,7 +902,6 @@ def toggle_mode_controls(mode):
         return hide, hide, show
 
 
-# ── Top-N auto-fill for highlight mode ────────────────────────────────────────
 @app.callback(
     Output("sel-highlight", "value", allow_duplicate=True),
     Input("sld-topn", "value"),
@@ -1118,6 +1152,7 @@ def hier_navigate(drill_n, back_n, reset_n, cat, path, loaded):
     Input("store-hier-path", "data"),
     Input("tabs", "value"),
     Input("store-hier-render-tick", "data"),
+    State("sld-topn", "value"),
     State("sld-pt", "value"),
     State("sld-alpha", "value"),
     State("sel-bg", "value"),
@@ -1129,7 +1164,7 @@ def hier_navigate(drill_n, back_n, reset_n, cat, path, loaded):
     State("store-data-loaded", "data"),
     prevent_initial_call=True,
 )
-def update_hierarchy(path, tab, render_tick, pt, alpha, bg,
+def update_hierarchy(path, tab, render_tick, top_n_val, pt, alpha, bg,
                      viz_col, viz_mode, viz_cats, viz_highlighted, viz_density_cat,
                      loaded):
     if tab != "hierarchy" or not loaded or _S["df"] is None:
@@ -1200,16 +1235,17 @@ def update_hierarchy(path, tab, render_tick, pt, alpha, bg,
         card = len(vc)
         cat_opts = [{"label": f"{c}  ({vc[c]:,})", "value": c} for c in cats_sorted]
         mode = "distinct" if card <= CARD_THRESHOLD else "highlight"
+        top_n = top_n_val if top_n_val is not None else 10
         if mode == "distinct":
             return (fig, hier_cat_opts, None,
                     col_opts, default_col, mode,
                     cat_opts, cats_sorted, cat_opts, [],
                     cat_opts, None, min(card, 50))
         else:
-            top10 = vc.head(10).index.tolist()
+            top_n_list = vc.head(top_n).index.tolist()
             return (fig, hier_cat_opts, None,
                     col_opts, default_col, mode,
-                    cat_opts, [], cat_opts, top10,
+                    cat_opts, [], cat_opts, top_n_list,
                     cat_opts, None, min(card, 50))
     else:
         return (fig, hier_cat_opts, None,
