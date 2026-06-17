@@ -7,22 +7,21 @@ This project builds protein vector representations from Maximal Repeat (MR) sequ
 The pipeline is split into independent stages: each one reads from the previous stage's output, so you can re-run any step in isolation without going back to the start.
 
 ```
-MR dataset  →  [Stage 1] Corpus prep (BigQuery)
-            →  [Stage 2] FastText training
-            →  [Stage 2b] Control corpus (optional)
-            →  [Stage 3] Protein vector computation
+MR dataset  →  [Stage 1]  Corpus prep (BigQuery)
+            →  [Stage 1b] Control corpus (optional — sidestep of Stage 1)
+            →  [Stage 2]  FastText training
+            →  [Stage 3]  Protein vector computation
             →  [Stage 3b] Cross-dataset embedding (optional)
             →  [Stage 3c] Combine real + control vectors (optional)
-            →  [Stage 4] Dimensionality reduction (t-SNE / UMAP / densMAP)
-            →  [Stage 5] Metrics & evaluation
-            →  [Stage 6] Visualization (charts / interactive explorer)
+            →  [Stage 4]  Dimensionality reduction (openTSNE / UMAP / densMAP)
+            →  [Stage 5]  Metrics & evaluation
+            →  [Stage 6]  Interactive visualization (Dash explorer)
 ```
 
 **Tech stack:**
 - Python · Pandas · BigQuery + Cloud Storage · Gensim FastText
-- scikit-learn PCA · t-SNE (sklearn / openTSNE) · UMAP / densMAP
-- Dash + Plotly (interactive explorer) · Seaborn + Matplotlib (static charts)
-- Tensorboard (projector)
+- scikit-learn PCA · openTSNE · UMAP / densMAP
+- Dash + Plotly (interactive explorer)
 
 ---
 
@@ -59,7 +58,9 @@ pip install -r requirements.txt
 
 **2. Google Cloud setup**
 
-- Create a GCP project with BigQuery and Cloud Storage APIs enabled.
+BigQuery is used both to run the heavy corpus-prep joins (at scale, local DataFrames and even DuckDB with 128 GB RAM can't handle 3B MR positions) and as a convenient environment for ad-hoc data exploration on massive protein/MR tables.
+
+- Create a GCP project with BigQuery and Cloud Storage APIs enabled. If a project already exists, you can reuse it — just make sure the service account below has the required roles and that the bucket is in the same project.
 - Create a Service Account with roles `BigQuery Admin` and `Storage Admin`.
 - Download its JSON key and place it anywhere accessible (e.g. project root).
 - Create a Storage bucket that will be used for BigQuery ↔ local data transfers.
@@ -83,7 +84,7 @@ Most scripts share the same four positional parameters that together form a **Ru
 
 | Parameter | What it is | Valid values (from `utils/utils.py`) |
 |---|---|---|
-| `TIMESTAMP` | When the corpus prep run was started | `YYYY_MM_DD_Hh_Mm_ss` |
+| `TIMESTAMP` | When the corpus prep run was started | `YYYYMMDD_HH_MM_SS` (e.g. `20250101_11_14_21`) |
 | `DATASET` | Protein dataset name | `TEST_GROUP`, `NANO_GROUP`, `FAMILY`, `BSC`, `FAMILY_200`, `BSC_ANK` |
 | `MR_FILTER` | MR filtering rule | `MR_FILTER_NONE`, `MR_FILTER_DROP_NE`, `MR_FILTER_KEEP_NE`, `MR_FILTER_KEEP_SMR`, `MR_FILTER_KEEP_4_10`, etc. |
 | `PARTITION_RULE` | How BioWords are partitioned | `PARTITION_RULE_USE_ALL` |
@@ -120,6 +121,27 @@ Explore results with `corpus_prep/corpus_prep_exploration.ipynb`.
 
 ---
 
+### Stage 1b — Control corpus (optional)
+
+Control data is a sidestep of the corpus prep stage, not part of model training. Its purpose is to evaluate how well the trained model generalizes: control proteins are embedded and projected alongside the real dataset so that their distribution can be compared against the expected clustering.
+
+**Key constraint:** control proteins must not influence the model in any way — they should not be used to compute Maximal Repeats and must not appear in the training corpus. This means the control corpus cannot go through BigQuery like the main pipeline. Instead, this script downloads the MR vocabulary already computed for the real run and runs the Aho-Corasick algorithm locally to find MR pattern matches in the control protein sequences, producing a BioWord corpus for them using the same vocabulary.
+
+Requires a `control_<dataset>_sequence_dataset.csv` file inside the corresponding dataset input folder (see Input dataset section).
+
+```bash
+python -m corpus_prep.corpus_prep_control TIMESTAMP DATASET MR_FILTER PARTITION_RULE
+```
+
+```bash
+# Example
+python -m corpus_prep.corpus_prep_control 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+```
+
+Output: a `20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-s3_corpus_control_for_eval.csv` file placed alongside the regular corpus shards in the dataset date folder.
+
+---
+
 ### Stage 2 — Model training
 
 Trains a FastText model on the corpus from Stage 1. Downloads the corpus from BigQuery, assembles shards into a single joined file, then trains.
@@ -131,10 +153,10 @@ python -m corpus_prep.corpus_train TIMESTAMP DATASET MR_FILTER PARTITION_RULE \
 
 ```bash
 # Example
-python -m corpus_prep.corpus_train 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
 
 # With custom embedding size and CPU limit
-python -m corpus_prep.corpus_train 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
+python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
     --vector-size 200 --max-cpu 8
 ```
 
@@ -151,31 +173,12 @@ processed_datasets/
     └── 20250101/
         └── models/
             ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model
-            ├── *.model.syn1.npy
-            ├── *.model.wv.vectors_ngrams.npy
-            └── *.model.wv.vectors_vocab.npy
+            ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model.syn1.npy
+            ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model.wv.vectors_ngrams.npy
+            └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model.wv.vectors_vocab.npy
 ```
 
 > **Resources:** training on 700K proteins / 103M MR vocabulary requires ~150 GB RAM and ~5 hours on a 48-vCPU machine.
-
----
-
-### Stage 2b — Control corpus (optional)
-
-If you have a control dataset, this stage builds its BioWord corpus locally using the MR vocabulary from the real run (without re-running BigQuery). It runs the Aho-Corasick algorithm to find pattern matches.
-
-Requires a `control_DATASET_sequence_dataset.csv` file inside the corresponding dataset input folder.
-
-```bash
-python -m corpus_prep.corpus_prep_control TIMESTAMP DATASET MR_FILTER PARTITION_RULE
-```
-
-```bash
-# Example
-python -m corpus_prep.corpus_prep_control 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
-```
-
-Output: `*-s3_corpus_control_for_eval` file placed alongside the regular corpus shards.
 
 ---
 
@@ -190,13 +193,13 @@ python -m model_eval.model_embeddings TIMESTAMP DATASET MR_FILTER PARTITION_RULE
 
 ```bash
 # Standard run
-python -m model_eval.model_embeddings 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
 
 # Control dataset
-python -m model_eval.model_embeddings 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --control
+python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --control
 
 # Memory-constrained machine: use mmap to reduce RAM (slower load)
-python -m model_eval.model_embeddings 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --mmap
+python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --mmap
 ```
 
 | Flag | Description |
@@ -207,8 +210,8 @@ python -m model_eval.model_embeddings 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTE
 
 **Output** under `INPUT_DATA_ROOT_PATH/DATASET/YYYYMMDD/RUNID/vector_output/`:
 ```
-*-metadata.tsv       # protein labels (family_name, family_type, etc.)
-*-vectors_bio.tsv    # protein vectors
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-metadata.tsv     # protein labels
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_bio.tsv  # protein vectors
 ```
 
 > **Resources:** iterating 700K proteins takes ~5 hours. Large model load: ~30 min and ~120 GB RAM (mmap saves ~30% RAM but increases load time 4×).
@@ -231,14 +234,14 @@ python -m model_eval.model_embeddings_cross \
 ```bash
 # Example: embed BSC proteins using a model trained on familyDataset
 python -m model_eval.model_embeddings_cross \
-    2025_01_01_H11_M14_S21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL \
-    2025_01_01_H09_M00_S00 FAMILY MR_FILTER_NONE PARTITION_RULE_USE_ALL
+    20250101_11_14_21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL \
+    20250101_09_00_00 FAMILY MR_FILTER_NONE PARTITION_RULE_USE_ALL
 ```
 
 Output is placed under the **input dataset** run folder, tagged with a compact model label (`cross_<MODEL_TAG>`):
 ```
-*-cross_family-vectors_bio.tsv
-*-cross_family-metadata.tsv
+20250101_11_14_21-bscDataset-filter_none-partition_use_all-cross_family-vectors_bio.tsv
+20250101_11_14_21-bscDataset-filter_none-partition_use_all-cross_family-metadata.tsv
 ```
 
 Pass `--cross <MODEL_TAG>` to Stage 4 to use these vectors in dimensionality reduction.
@@ -253,24 +256,24 @@ If you want to run dimensionality reduction on real and control proteins togethe
 python -m model_eval.model_combine_datasets TIMESTAMP DATASET MR_FILTER PARTITION_RULE
 ```
 
-Produces `*-combined-metadata.tsv` and `*-combined-vectors_bio.tsv` in the `vector_output` folder. Pass `--control` to Stage 4 and beyond to use the combined files.
+Produces `20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-combined-metadata.tsv` and `20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-combined-vectors_bio.tsv` in the `vector_output` folder. Pass `--control` to Stage 4 and beyond to use the combined files.
 
 ---
 
 ### Stage 4 — Dimensionality reduction
 
-Reduces protein vectors (typically 100D) to 2D or 3D for visualization. Supports **t-SNE** (sklearn / openTSNE), **UMAP**, and **densMAP** via a JSON experiment configuration.
+Reduces protein vectors (typically 100D) to 2D or 3D for visualization. Supports **openTSNE** and **UMAP / densMAP** via a JSON experiment configuration.
 
-**Experiment config** — create `experiment.json` under `vector_output/experiments/`:
+**Experiment config** — create `experiment.json` under `vector_output/experiments/`. Arrays drive parameter sweeps: the longest array determines how many runs execute; single-element arrays (or scalars) are reused across all runs.
 
+**openTSNE config example:**
 ```json
 {
     "reduction_method": "tsne",
-    "tsne_implementation": "sklearn",
+    "tsne_implementation": "openTSNE",
     "pca_n_components": 50,
     "n_components": [2],
     "random_state": [0, 1000, 537],
-    "method": ["barnes_hut"],
     "perplexity": [10, 30, 50],
     "learning_rate": ["auto"],
     "max_iter": [5000],
@@ -279,8 +282,7 @@ Reduces protein vectors (typically 100D) to 2D or 3D for visualization. Supports
 }
 ```
 
-For **UMAP / densMAP**, use `"reduction_method": "umap"` and add UMAP-specific keys:
-
+**UMAP / densMAP config example:**
 ```json
 {
     "reduction_method": "umap",
@@ -294,7 +296,7 @@ For **UMAP / densMAP**, use `"reduction_method": "umap"` and add UMAP-specific k
 }
 ```
 
-Arrays drive parameter sweeps — the longest array sets how many runs execute. Single-element arrays (or scalars) are reused for every run.
+> `densmap: true` enables densMAP, which additionally preserves local density information on top of UMAP's topology.
 
 ```bash
 python -m model_eval.model_dim_reduction TIMESTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_FILE \
@@ -302,17 +304,17 @@ python -m model_eval.model_dim_reduction TIMESTAMP DATASET MR_FILTER PARTITION_R
 ```
 
 ```bash
-# Standard t-SNE sweep
-python -m model_eval.model_dim_reduction 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
+# openTSNE sweep (3 perplexity values → 3 output files)
+python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
 
 # With combined control data
-python -m model_eval.model_dim_reduction 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment --control
+python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment --control
 
 # Using cross-embedded vectors (from Stage 3b)
-python -m model_eval.model_dim_reduction 2025_01_01_H11_M14_S21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment --cross family
+python -m model_eval.model_dim_reduction 20250101_11_14_21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment --cross family
 
 # Drop proteins where metadata column 'partition_type' == 'mr' before reducing
-python -m model_eval.model_dim_reduction 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment \
+python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment \
     --filter-col partition_type mr
 ```
 
@@ -322,11 +324,21 @@ python -m model_eval.model_dim_reduction 2025_01_01_H11_M14_S21 TEST_GROUP MR_FI
 | `--cross MODEL_TAG` | Use cross-embedded vectors tagged with `MODEL_TAG` |
 | `--filter-col COLUMN VALUE` | Drop rows where `COLUMN == VALUE` before reducing |
 
-**Output** under `vector_output/EXPERIMENT_FILE/`:
+**Output file naming** under `vector_output/my_experiment/`:
 ```
-*-vectors_pca-50.tsv
-*-vectors_tsne-2_barnes_hut_30_auto_5000_0.tsv
-*-vectors_umap-2_n15_d0.1_42.tsv
+# PCA baseline (always produced)
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_pca-50.tsv
+
+# t-SNE output pattern: vectors_tsne-[n_components]_[method]_[perplexity]_[learning_rate]_[max_iter]_[random_state]
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_tsne-2_auto_10_auto_5000_0.tsv
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_tsne-2_auto_30_auto_5000_1000.tsv
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_tsne-2_auto_50_auto_5000_537.tsv
+
+# UMAP output pattern: vectors_umap-[n_components]_n[n_neighbors]_d[min_dist]_[random_state]
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_umap-2_n15_d0.1_42.tsv
+
+# densMAP output (same pattern, prefixed with densmap)
+20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_densmap-2_n30_d0.1_42.tsv
 ```
 
 ---
@@ -342,11 +354,11 @@ python -m model_eval.model_metrics TIMESTAMP DATASET MR_FILTER PARTITION_RULE EX
 
 ```bash
 # Evaluate experiment using family_name as class label
-python -m model_eval.model_metrics 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
+python -m model_eval.model_metrics 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
     my_experiment family_name
 
 # With parallelization
-python -m model_eval.model_metrics 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
+python -m model_eval.model_metrics 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
     my_experiment family_name --max-workers 8
 ```
 
@@ -358,57 +370,43 @@ python -m model_eval.model_metrics 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_N
 
 ---
 
-### Stage 6 — Visualization
+### Stage 6 — Interactive visualization (Dash explorer)
 
-#### Static charts
+A browser-based explorer that handles 1M+ points via WebGL. Load any dimensionality reduction output and explore it interactively.
 
-Renders scatter plots for each experiment run, colored by `family_name` and `family_type`:
-
-```bash
-python -m model_viz.model_viz_enhanced TIMESTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_NAME \
-    [--control] [--mode single|grid] [--chart-type name|type|overlap] [--grid-resolution N]
-```
-
-```bash
-# Single chart, colored by family name
-python -m model_viz.model_viz_enhanced 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
-
-# Grid of all experiment runs
-python -m model_viz.model_viz_enhanced 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment \
-    --mode grid --chart-type type
-```
-
-Output charts saved under `vector_output/EXPERIMENT_NAME/charts/`.
-
-#### Interactive explorer (Dash web app)
-
-A browser-based explorer that handles 1M+ points via WebGL. Features: distinct-color / highlight / density-heatmap rendering modes, searchable dropdowns, CATH hierarchical drill-down, hover tooltips, PNG export.
+**Features:** distinct-color / highlight / density-heatmap rendering modes · searchable dropdowns for high-cardinality metadata columns · CATH hierarchical drill-down tab · hover tooltips · PNG export
 
 ```bash
 python -m model_viz.explorer_app
 # Open http://localhost:8050
 ```
 
-The app reads from the `vector_output` folder of the configured run; configure the Run ID via the UI dropdowns or environment variables.
+The app reads reduction outputs from the `vector_output` folder; the Run ID and experiment are selected via UI dropdowns.
 
-#### TensorBoard Projector
+---
 
-Interactive 3D projector for exploring embeddings with zoom, filter, and nearest-neighbor search. Note: browser memory limits sampling to ~10K points.
+## Legacy visualization tools
+
+The following tools predate the Dash explorer and are kept for reference. They are not actively maintained.
+
+**Static charts (`model_viz/model_viz_enhanced.py`)** — renders Matplotlib/Seaborn scatter plots for each experiment run, colored by `family_name` or `family_type`. Useful for producing publication-quality static figures.
 
 ```bash
-# Set up projector files
-python -m corpus_prep.tensorboard_setup tsne TIMESTAMP DATASET MR_FILTER PARTITION_RULE [--control]
-# or
-python -m corpus_prep.tensorboard_setup pca TIMESTAMP DATASET MR_FILTER PARTITION_RULE
-
-# The script will print the exact tensorboard serve command to run
+python -m model_viz.model_viz_enhanced TIMESTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_NAME \
+    [--control] [--mode single|grid] [--chart-type name|type|overlap]
 ```
 
-#### Jupyter exploration notebooks
+**TensorBoard Projector** — interactive 3D projector with zoom, filter, and nearest-neighbor search. Browser memory limits it to ~10K points.
 
-- `corpus_prep/corpus_prep_exploration.ipynb` — explore Stage 1 BigQuery outputs
-- `model_eval/model_eval_exploration.ipynb` — explore embeddings and reduction results
-- `model_viz/interactive_viz_explorer.py` — widget-based notebook explorer
+```bash
+python -m corpus_prep.tensorboard_setup tsne TIMESTAMP DATASET MR_FILTER PARTITION_RULE [--control]
+# prints the tensorboard serve command to run
+```
+
+**Jupyter notebooks** — for ad-hoc exploration:
+- `corpus_prep/corpus_prep_exploration.ipynb` — Stage 1 BigQuery outputs
+- `model_eval/model_eval_exploration.ipynb` — embeddings and reduction results
+- `model_viz/interactive_viz_explorer.py` — ipywidgets-based notebook explorer
 
 ---
 
@@ -422,19 +420,19 @@ source venv/bin/activate
 
 # 1. Corpus prep — loads MR data into BigQuery and computes the BioWord corpus
 python -m corpus_prep.corpus_prep_pipeline TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
-# Note the printed Run ID, e.g. 2025_01_01_H11_M14_S21-testGroupDataset-filter_none-partition_use_all
+# Note the printed Run ID, e.g. 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all
 
 # 2. Train FastText model on the corpus
-python -m corpus_prep.corpus_train 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
 
 # 3. Compute protein embedding vectors
-python -m model_eval.model_embeddings 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
 
 # 4. Dimensionality reduction — place experiment.json in vector_output/experiments/ first
-python -m model_eval.model_dim_reduction 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
+python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
 
 # 5. Visualize
-python -m model_viz.model_viz_enhanced 2025_01_01_H11_M14_S21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
+python -m model_viz.model_viz_enhanced 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
 # Or launch the interactive explorer:
 python -m model_viz.explorer_app
 ```
@@ -446,27 +444,31 @@ python -m model_viz.explorer_app
 ```
 processed_datasets/
 └── testGroupDataset/
-    ├── testGroupDataset_*_PATTERNS.csv          # input (Stage 1 input)
-    ├── testGroupDataset_*_POSITIONS.csv         # input (Stage 1 input)
-    ├── testGroupDataset_sequence_dataset.csv    # input (Stage 1 input)
-    ├── 20250101/
-    │   ├── models/
-    │   │   └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model
-    │   │       *.model.syn1.npy  *.model.wv.vectors_ngrams.npy  *.model.wv.vectors_vocab.npy
-    │   ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-s3_corpus_for_train_0.gz
-    │   ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-s3_corpus_for_train_joined.csv
-    │   └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all/
-    │       └── vector_output/
-    │           ├── *-metadata.tsv
-    │           ├── *-vectors_bio.tsv
-    │           ├── experiments/
-    │           │   └── my_experiment.json
-    │           └── my_experiment/
-    │               ├── *-vectors_pca-50.tsv
-    │               ├── *-vectors_tsne-2_barnes_hut_30_auto_5000_0.tsv
-    │               └── charts/
-    │                   └── *.png
-    └── logs/                                    # stage run logs
+    ├── testGroupDataset_1_999999_1_PATTERNS.csv      # Stage 1 input
+    ├── testGroupDataset_1_999999_1_POSITIONS.csv     # Stage 1 input
+    ├── testGroupDataset_sequence_dataset.csv         # Stage 1 input
+    ├── control_testGroupDataset_sequence_dataset.csv # Stage 1b input (optional)
+    └── 20250101/
+        ├── models/
+        │   ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model
+        │   ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model.syn1.npy
+        │   ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model.wv.vectors_ngrams.npy
+        │   └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all.model.wv.vectors_vocab.npy
+        ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-s3_corpus_for_train_0.gz
+        ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-s3_corpus_for_train_joined.csv
+        ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-s3_corpus_control_for_eval.csv
+        └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all/
+            └── vector_output/
+                ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-metadata.tsv
+                ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_bio.tsv
+                ├── experiments/
+                │   └── my_experiment.json
+                └── my_experiment/
+                    ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_pca-50.tsv
+                    ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_tsne-2_auto_30_auto_5000_0.tsv
+                    ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_umap-2_n15_d0.1_42.tsv
+                    └── charts/
+                        └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-family_name.png
 ```
 
 ---
@@ -480,5 +482,5 @@ processed_datasets/
 
 - **Stage 1 (BigQuery):** scales to any size; cost is determined by GCP query bytes processed.
 - **Stage 3 (vector compute):** iterating 700K proteins takes ~5 h; no parallelization currently.
-- **Stage 4 (t-SNE `barnes_hut`):** recommended over `exact` for large datasets to avoid memory overflow.
-- **UMAP / densMAP:** generally faster than t-SNE for large datasets; densMAP also preserves density information.
+- **Stage 4 (openTSNE):** generally faster than sklearn's implementation; automatically selects the best approximation method based on dataset size.
+- **Stage 4 (UMAP / densMAP):** faster than t-SNE for large datasets; densMAP additionally preserves local density information.
