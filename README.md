@@ -6,6 +6,12 @@ This project builds protein vector representations from Maximal Repeat (MR) sequ
 
 The pipeline is split into independent stages: each one reads from the previous stage's output, so you can re-run any step in isolation without going back to the start.
 
+> **Running long stages:** most pipeline commands (corpus prep, training, vector computation, dimensionality reduction) take minutes to hours. Run them with `nohup` so they survive terminal disconnection, and redirect stdout to a log file:
+> ```bash
+> nohup python -m <module> <args> > output.log &
+> ```
+> Progress and errors are also written to the stage-specific log file under the `logs/` folder in the project root.
+
 ```
 MR dataset  →  [Stage 1]  Corpus prep (BigQuery)
             →  [Stage 1b] Control corpus (optional — sidestep of Stage 1)
@@ -106,16 +112,34 @@ Loads the input MR dataset into BigQuery, applies the chosen MR filter, and comp
 2. Intermediate results land in the `stage_results` dataset under tables prefixed with the Run ID and stage name (`s1_filtered_mrs`, `s2_joined_mrs`, `s3_corpus`).
 
 ```bash
-python -m corpus_prep.corpus_prep_pipeline DATASET MR_FILTER PARTITION_RULE [--dry-run]
+python -m corpus_prep.corpus_prep_pipeline DATASET MR_FILTER PARTITION_RULE [--dry-run] \
+    [--metadata-table TABLE] [--metadata-join-key CORPUS_COL:METADATA_COL]
 ```
 
 ```bash
 # Example
-python -m corpus_prep.corpus_prep_pipeline TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+nohup python -m corpus_prep.corpus_prep_pipeline TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL > output.log &
 
 # Dry run: stage tables get a `99_tmp-` prefix and expire after 1 day
 python -m corpus_prep.corpus_prep_pipeline TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --dry-run
+
+# Custom metadata (see below)
+nohup python -m corpus_prep.corpus_prep_pipeline BSC MR_FILTER_KEEP_NE PARTITION_RULE_USE_ALL \
+    --metadata-table bscDataset_metadata --metadata-join-key sequence_name:seq_id > output.log &
 ```
+
+**Custom metadata table (overrides default metadata structure)**
+
+By default, the corpus query joins against the `family_types` table in `protein_input` to attach `sequence_family_name` and `sequence_family_type` to each protein. This works for datasets that follow the standard family-type schema.
+
+For datasets with a different metadata structure (e.g. BSC, which has no canonical `family_types` table), use `--metadata-table` and `--metadata-join-key` together. When both flags are set, the default `family_types` join is replaced entirely by a left join against the specified metadata table. All columns from that table (except the join key column itself) are carried into the corpus output. The `sequence_family_name`-based BigQuery clustering is also skipped, since that column is no longer guaranteed to exist.
+
+Both flags must be provided together:
+
+| Flag | Description |
+|---|---|
+| `--metadata-table TABLE` | Name of the metadata table in the `protein_input` BQ dataset (e.g. `bscDataset_metadata`) |
+| `--metadata-join-key CORPUS_COL:METADATA_COL` | Join key as `corpus_column:metadata_column` (e.g. `sequence_name:seq_id`) |
 
 Explore results with `corpus_prep/corpus_prep_exploration.ipynb`.
 
@@ -153,11 +177,11 @@ python -m corpus_prep.corpus_train TIMESTAMP DATASET MR_FILTER PARTITION_RULE \
 
 ```bash
 # Example
-python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+nohup python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL > output.log &
 
 # With custom embedding size and CPU limit
-python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
-    --vector-size 200 --max-cpu 8
+nohup python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL \
+    --vector-size 200 --max-cpu 8 > output.log &
 ```
 
 | Flag | Default | Description |
@@ -193,13 +217,13 @@ python -m model_eval.model_embeddings TIMESTAMP DATASET MR_FILTER PARTITION_RULE
 
 ```bash
 # Standard run
-python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+nohup python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL > output.log &
 
 # Control dataset
-python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --control
+nohup python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --control > output.log &
 
 # Memory-constrained machine: use mmap to reduce RAM (slower load)
-python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --mmap
+nohup python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL --mmap > output.log &
 ```
 
 | Flag | Description |
@@ -228,14 +252,18 @@ Takes two Run IDs: one for the **input sequences** (proteins to embed) and one f
 python -m model_eval.model_embeddings_cross \
     INPUT_TIMESTAMP INPUT_DATASET INPUT_FILTER INPUT_PARTITION_RULE \
     MODEL_TIMESTAMP MODEL_DATASET MODEL_FILTER MODEL_PARTITION_RULE \
+    MODEL_TAG \
     [--mmap] [--metadata]
 ```
 
+`MODEL_TAG` is a short label (e.g. `family`, `bscAnk8`) appended to output filenames so results from different models can coexist in the same folder.
+
 ```bash
 # Example: embed BSC proteins using a model trained on familyDataset
-python -m model_eval.model_embeddings_cross \
+nohup python -m model_eval.model_embeddings_cross \
     20250101_11_14_21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL \
-    20250101_09_00_00 FAMILY MR_FILTER_NONE PARTITION_RULE_USE_ALL
+    20250101_09_00_00 FAMILY MR_FILTER_NONE PARTITION_RULE_USE_ALL \
+    family > output.log &
 ```
 
 Output is placed under the **input dataset** run folder, tagged with a compact model label (`cross_<MODEL_TAG>`):
@@ -299,23 +327,25 @@ Reduces protein vectors (typically 100D) to 2D or 3D for visualization. Supports
 > `densmap: true` enables densMAP, which additionally preserves local density information on top of UMAP's topology.
 
 ```bash
-python -m model_eval.model_dim_reduction TIMESTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_FILE \
+python -m model_eval.model_dim_reduction TIMESTAMP DATASET MR_FILTER PARTITION_RULE EXPERIMENT_FILE.json \
     [--control] [--cross MODEL_TAG] [--filter-col COLUMN VALUE]
 ```
 
+The experiment file must be passed **with the `.json` extension** — the script strips it to derive the output folder name.
+
 ```bash
 # openTSNE sweep (3 perplexity values → 3 output files)
-python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
+nohup python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment.json > output.log &
 
 # With combined control data
-python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment --control
+nohup python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment.json --control > output.log &
 
 # Using cross-embedded vectors (from Stage 3b)
-python -m model_eval.model_dim_reduction 20250101_11_14_21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment --cross family
+nohup python -m model_eval.model_dim_reduction 20250101_11_14_21 BSC MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment.json --cross family > output.log &
 
 # Drop proteins where metadata column 'partition_type' == 'mr' before reducing
-python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment \
-    --filter-col partition_type mr
+nohup python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment.json \
+    --filter-col partition_type mr > output.log &
 ```
 
 | Flag | Description |
@@ -324,7 +354,7 @@ python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_
 | `--cross MODEL_TAG` | Use cross-embedded vectors tagged with `MODEL_TAG` |
 | `--filter-col COLUMN VALUE` | Drop rows where `COLUMN == VALUE` before reducing |
 
-**Output file naming** under `vector_output/my_experiment/`:
+**Output file naming** under `vector_output/experiments/my_experiment/`:
 ```
 # PCA baseline (always produced)
 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_pca-50.tsv
@@ -419,17 +449,17 @@ The `TEST_GROUP` dataset is small (~483 proteins) and fast to process — good f
 source venv/bin/activate
 
 # 1. Corpus prep — loads MR data into BigQuery and computes the BioWord corpus
-python -m corpus_prep.corpus_prep_pipeline TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+nohup python -m corpus_prep.corpus_prep_pipeline TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL > output.log &
 # Note the printed Run ID, e.g. 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all
 
 # 2. Train FastText model on the corpus
-python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+nohup python -m corpus_prep.corpus_train 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL > output.log &
 
 # 3. Compute protein embedding vectors
-python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL
+nohup python -m model_eval.model_embeddings 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL > output.log &
 
-# 4. Dimensionality reduction — place experiment.json in vector_output/experiments/ first
-python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
+# 4. Dimensionality reduction — place my_experiment.json in vector_output/experiments/ first
+nohup python -m model_eval.model_dim_reduction 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment.json > output.log &
 
 # 5. Visualize
 python -m model_viz.model_viz_enhanced 20250101_11_14_21 TEST_GROUP MR_FILTER_NONE PARTITION_RULE_USE_ALL my_experiment
@@ -461,14 +491,14 @@ processed_datasets/
             └── vector_output/
                 ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-metadata.tsv
                 ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_bio.tsv
-                ├── experiments/
-                │   └── my_experiment.json
-                └── my_experiment/
-                    ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_pca-50.tsv
-                    ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_tsne-2_auto_30_auto_5000_0.tsv
-                    ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_umap-2_n15_d0.1_42.tsv
-                    └── charts/
-                        └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-family_name.png
+                └── experiments/
+                    ├── my_experiment.json
+                    └── my_experiment/
+                        ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_pca-50.tsv
+                        ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_tsne-2_auto_30_auto_5000_0.tsv
+                        ├── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-vectors_umap-2_n15_d0.1_42.tsv
+                        └── charts/
+                            └── 20250101_11_14_21-testGroupDataset-filter_none-partition_use_all-family_name.png
 ```
 
 ---
