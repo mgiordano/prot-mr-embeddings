@@ -356,6 +356,7 @@ class dataset_names():
     FAMILY_200 = "familyDataset200"
     FAMILY_200_M = "familyDataset200minus"
     BSC_ANK = "bscNEWAnkDataset"
+    BSC_TPR1 = "bscTPR1Dataset"
 
 class data_step_names():
     S1_FILTERED_MR = "s1_filtered_mrs"
