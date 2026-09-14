@@ -134,7 +134,7 @@ def find_vector_files(folder):
 
 
 def load_data(vec_path, meta_path):
-    vdf = pd.read_csv(vec_path, sep="\t", dtype=np.float32)
+    vdf = pd.read_csv(vec_path, sep="\t", header=None, dtype=np.float32)
     # If more than 2 columns, take only the first two (for 2D visualization)
     if vdf.shape[1] > 2:
         vdf = vdf.iloc[:, :2]
